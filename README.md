@@ -87,13 +87,13 @@ dick web            # 然后打开 http://127.0.0.1:3907
 | --- | --- | --- | --- | --- |
 | Pacman | `pacman.conf` 和递归 `Include` 中的 `Server` → `.db` | `pacman -Qn` / `pacman -R [-Rns]` | `pacman -S repo/name` | 首要链路，多镜像失败自动切换，zstd/gzip/xz/bzip2/未压缩 tar |
 | AUR | 官方 RPC v5 的 search/info | `pacman -Qm` / `pacman -R [-Rns]` | `paru` 或 `yay` | Arch 上按需查询，默认缓存 15 分钟；不自行下载或构建 PKGBUILD |
-| Flatpak | `flatpak remotes`、`flatpak remote-ls` 的 TSV | `flatpak list --app` / `flatpak uninstall` | `flatpak install remote ID` | 已配置远端的应用，默认 Flatpak 安装作用域 |
+| Flatpak | `flatpak remotes`、`flatpak remote-ls --json`（老版本退回 TSV） | `flatpak list --app` / `flatpak uninstall` | `flatpak install remote ID` | 已配置远端的应用，默认 Flatpak 安装作用域；`remote-ls` 不给描述与版本（1.18 起不认识的列会被静默丢弃），所以描述退回应用显示名 |
 | APT | `.list` / Deb822 `.sources` → 各组件与架构的 `Packages` | `dpkg-query -W` / `apt-get remove\|purge` | `apt-get install` | 基础实现，xz/gzip/未压缩索引、平铺仓库、多文件合并 |
 | DNF | `.repo` → `repomd.xml` → primary XML | `rpm -qa` / `dnf remove` | `dnf install` | 基础实现，baseurl/mirrorlist/metalink、元数据 checksum、架构筛选 |
 | Snap | `snap find` 的列表输出 | `snap list` / `snap remove` | `snap install` | 已安装 Snap 时按需查询，TTL 缓存 |
 | Linyaps（如意玲珑） | `ll-cli --json search` 的 JSON | `ll-cli --json list --type=app` / `ll-cli uninstall` | `ll-cli install ID` | 已安装 `ll-cli` 时按需查询，TTL 缓存；仓库来自 `ll-cli --json repo show`，读取失败时退化为单一 `linglong` 仓库 |
 
-Pacman/APT/DNF 搜索不执行 `pacman -Ss`、`apt search` 或 `dnf search`。Flatpak 的 OSTree/AppStream 数据需要额外协议和解析依赖，Snap 商店和 Linyaps 仓库也没有本原型采用的稳定公开全量索引格式（Linyaps 依赖 `ll-cli` 自己输出 JSON），所以按需求允许的例外使用原生命令。Flatpak/Snap/Linyaps 版本过旧、无远端或输出列不兼容时会报告错误。
+Pacman/APT/DNF 搜索不执行 `pacman -Ss`、`apt search` 或 `dnf search`。Flatpak 的 OSTree/AppStream 数据需要额外协议和解析依赖，Snap 商店和 Linyaps 仓库也没有本原型采用的稳定公开全量索引格式（Linyaps 依赖 `ll-cli` 自己输出 JSON），所以按需求允许的例外使用原生命令。Flatpak/Snap/Linyaps 版本过旧、无远端或输出完全无法解析时会报告错误（Flatpak 的列数变化会被容忍，见上表）。
 
 AUR 在 Arch 上没有独立数据库，`pacman -Qm` 列出的是同步数据库之外的外来包（AUR 或手工构建），因此与 `pacman -Qn` 分开统计，同一个包不会被列出两次。Flatpak/Snap/Linyaps 只参与搜索、列表、安装和卸载；`upgrade` 只作用于 pacman/apt/dnf 这类系统管理器。
 

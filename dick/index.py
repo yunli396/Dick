@@ -5,7 +5,7 @@ import threading
 from urllib.parse import quote, urlencode, urljoin
 import xml.etree.ElementTree as ET
 
-from .discovery import native_output
+from .discovery import english_locale, native_output
 from .models import DickError, Package
 from .parsers import apt_packages, dnf_packages, pacman_packages
 
@@ -76,18 +76,43 @@ class Index:
             return content
         raise DickError("DNF 仓库没有可用 primary XML 元数据")
 
+    def _flatpak_packages(self, repository):
+        """flatpak ≥ 1.18 的 `remote-ls --columns=` 会静默丢掉它不认识的列（description、version
+        就属于这类），四列请求只会回两列；所以优先读 `--json`，老版本再退回 TSV。两边的字段名都
+        跟 locale 走，必须用 C 语言跑，否则 JSON 的键会变成「应用程序_id」。
+        """
+        timeout = max(60, self.settings.timeout)
+        try:
+            payload = json.loads(native_output(["flatpak", "remote-ls", "--app", "--json", repository.name],
+                                                timeout=timeout, env=english_locale()))
+        except (DickError, ValueError):
+            payload = None
+        packages = []
+        if isinstance(payload, list):
+            for entry in payload:
+                if not isinstance(entry, dict):
+                    continue
+                name = str(entry.get("application_id") or entry.get("application") or "").strip()
+                if not name:
+                    continue
+                label = str(entry.get("name") or "").strip()
+                version = str(entry.get("version") or "").strip()
+                packages.append(Package(name, "flatpak", label or name, version, repository.name))
+        if packages:
+            return packages
+        output = native_output(["flatpak", "remote-ls", "--app", "--columns=application,name,branch,origin",
+                                repository.name], timeout=timeout, env=english_locale())
+        for line in output.splitlines():
+            fields = [field.strip() for field in line.split("\t")]
+            if len(fields) >= 2 and fields[0]:
+                packages.append(Package(fields[0], "flatpak", fields[1] or fields[0], "", repository.name))
+            elif line.strip():
+                raise DickError(f"Flatpak 输出不是预期的 TSV：{line.strip()[:120]}")
+        return packages
+
     def refresh_repository(self, repository):
         if repository.source == "flatpak":
-            output = native_output(["flatpak", "remote-ls", "--app", "--columns=application,name,description,version",
-                                    repository.name], timeout=max(60, self.settings.timeout))
-            packages = []
-            for line in output.splitlines():
-                parts = line.split("\t")
-                if len(parts) >= 4 and parts[0]:
-                    packages.append(Package(parts[0], "flatpak", parts[2] or parts[1], parts[3], repository.name))
-                elif line.strip():
-                    raise DickError("Flatpak 输出不是预期的四列 TSV")
-            return self.cache.replace(repository, packages)
+            return self.cache.replace(repository, self._flatpak_packages(repository))
         parsers = {"pacman": pacman_packages, "apt": apt_packages, "dnf": dnf_packages}
         failures = []
         urls = self._dnf_urls(repository) if repository.source == "dnf" else repository.urls

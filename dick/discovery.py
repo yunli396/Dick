@@ -2,6 +2,7 @@ import configparser
 import glob
 import hashlib
 import json
+import os
 from pathlib import Path
 import re
 import shlex
@@ -143,9 +144,17 @@ def dnf_repositories(settings):
     return repositories
 
 
-def native_output(command, timeout=60):
+def english_locale():
+    """flatpak 这类命令的输出字段跟着 locale 走（连 JSON 键都会被翻译），解析前统一按 C 语言跑。"""
+    env = dict(os.environ)
+    env["LC_ALL"] = "C"
+    env["LANG"] = "C"
+    return env
+
+
+def native_output(command, timeout=60, env=None):
     try:
-        result = subprocess.run(command, check=False, capture_output=True, text=True, timeout=timeout)
+        result = subprocess.run(command, check=False, capture_output=True, text=True, timeout=timeout, env=env)
     except (OSError, subprocess.TimeoutExpired) as error:
         raise DickError(f"命令失败 {command[0]}：{error}") from error
     if result.returncode:

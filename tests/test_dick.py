@@ -338,15 +338,55 @@ class IndexTests(FixtureTest):
         self.assertFalse(packages)
         self.assertIn("Too many results", errors[0])
 
-    def test_flatpak_tsv_and_package_id_alias(self):
+    def test_flatpak_json_index_survives_the_dropped_columns(self):
+        """flatpak ≥ 1.18 的 remote-ls 会静默丢掉 description/version 列：必须改读 --json。"""
         repository = Repository("flatpak", "flathub", ())
         index = self.index([repository])
-        with patch("dick.index.native_output", return_value="org.mozilla.firefox\tFirefox\tWeb browser\t130\n") as output:
+        payload = json.dumps([
+            {"name": "Firefox", "application_id": "org.mozilla.firefox", "version": "",
+             "branch": "stable", "origin": "flathub"},
+            {"name": "", "application_id": "org.gnome.Calculator", "version": "48.1",
+             "branch": "stable", "origin": "flathub"},
+        ])
+        with patch("dick.index.native_output", return_value=payload) as output:
+            packages, errors = index.search("firefox", ["flatpak"], exact=True)
+        self.assertFalse(errors)
+        self.assertEqual([package.name for package in packages], ["org.mozilla.firefox"])
+        self.assertEqual(packages[0].description, "Firefox")          # 没有描述时退回显示名
+        self.assertEqual(output.call_args.args[0], ["flatpak", "remote-ls", "--app", "--json", "flathub"])
+        self.assertEqual(output.call_args.kwargs["env"]["LC_ALL"], "C")  # 否则 JSON 键会被翻译
+
+    def test_flatpak_without_json_falls_back_to_tsv(self):
+        repository = Repository("flatpak", "flathub", ())
+        index = self.index([repository])
+        calls = []
+
+        def fake(command, timeout=60, env=None):
+            calls.append(command)
+            if "--json" in command:
+                raise DickError("命令失败 flatpak remote-ls：error: Unknown option --json")
+            return "org.mozilla.firefox\tFirefox\tstable\tflathub\n"
+
+        with patch("dick.index.native_output", side_effect=fake):
             packages, errors = index.search("firefox", ["flatpak"], exact=True)
         self.assertFalse(errors)
         self.assertEqual(packages[0].name, "org.mozilla.firefox")
-        self.assertEqual(output.call_args.args[0], ["flatpak", "remote-ls", "--app",
-                                                   "--columns=application,name,description,version", "flathub"])
+        self.assertEqual(packages[0].description, "Firefox")
+        self.assertEqual(calls[1], ["flatpak", "remote-ls", "--app",
+                                    "--columns=application,name,branch,origin", "flathub"])
+
+    def test_flatpak_garbage_line_names_the_offending_output(self):
+        index = self.index([Repository("flatpak", "flathub", ())])
+
+        def fake(command, timeout=60, env=None):
+            if "--json" in command:
+                return "不是 JSON"
+            return "No matches found\n"
+
+        with patch("dick.index.native_output", side_effect=fake):
+            packages, errors = index.search("firefox", ["flatpak"], exact=True)
+        self.assertFalse(packages)
+        self.assertIn("Flatpak 输出不是预期的 TSV：No matches found", errors[0])
 
     def test_snap_native_table_is_cached(self):
         index = self.index([Repository("snap", "snap-store", ())])
