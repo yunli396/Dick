@@ -728,12 +728,37 @@ class InstallationTests(FixtureTest):
             self.assertEqual(installer.install_command(Package("firefox", "aur", repository="aur")),
                              ["paru", "-S", "--", "aur/firefox"])
 
-    def test_linyaps_install_is_user_scoped_and_registered(self):
+    def test_linyaps_install_and_remove_go_through_sudo_for_polkit(self):
+        """玲珑的服务用 polkit（默认 auth_admin）把关，普通用户调用只会在桌面会话里弹认证框；
+        网页/手机没人守着桌面，所以安装与卸载都必须和 pacman 一样走 sudo。"""
         self.settings.root = Path("/")
         installer = Installer(self.settings, Mock(), self.messages.append, yes=True)
         installer.privileged = lambda command: ["sudo", *command]
         self.assertEqual(installer.install_command(Package("org.deepin.calculator", "linyaps", repository="stable")),
-                         ["ll-cli", "install", "-y", "org.deepin.calculator"])
+                         ["sudo", "ll-cli", "install", "-y", "org.deepin.calculator"])
+        self.assertEqual(installer.uninstall_command(Package("cn.wps.wps-office", "linyaps")),
+                         ["sudo", "ll-cli", "uninstall", "cn.wps.wps-office"])
+
+    def test_linyaps_not_authorized_explains_polkit(self):
+        """`Error 9: not authorized` 不能只留一句「退出码 255」，要说清是 polkit 授权问题。"""
+        index = Mock()
+        index.search.side_effect = lambda *args, **kwargs: (
+            [Package("com.qq.music", "linyaps", repository="stable")], [])
+        installer = self.installer(index)
+
+        def fail(command):
+            installer.last_output = ["执行：sudo ll-cli install -y com.qq.music",
+                                     "Error 9: not authorized"]
+            return 255
+
+        with patch.object(self.settings, "available", return_value=True), \
+                patch.object(installer, "execute", side_effect=fail):
+            result = installer.install("com.qq.music", ["linyaps"])
+        self.assertFalse(result["success"])
+        joined = "\n".join(self.messages)
+        self.assertIn("polkit", joined)
+        self.assertIn("sudo ll-cli install -y com.qq.music", joined)
+        self.assertIn("49-dick-linglong.rules", joined)
 
     def test_stream_captures_output_and_returncode(self):
         """Web 任务：子进程的 stdout/stderr 与回车刷新的进度都要进任务日志，退出码原样返回。"""
@@ -870,7 +895,7 @@ class CLITests(FixtureTest):
             code, output, _ = self.run_cli([*common, "install", "org.deepin.calculator", "--dry-run"])
         self.assertEqual(code, 0)
         attempt = json.loads(output)["results"][0]["attempts"][0]
-        self.assertEqual(attempt["command"], ["ll-cli", "install", "org.deepin.calculator"])
+        self.assertEqual(attempt["command"], ["sudo", "ll-cli", "install", "org.deepin.calculator"])
         self.assertEqual(attempt["returncode"], 0)
 
     def test_source_enable_disable_list_and_scan(self):

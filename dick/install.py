@@ -21,6 +21,12 @@ STALE_INDEX = re.compile(
     re.IGNORECASE,
 )
 
+# 玲珑（linyaps）的安装/卸载由系统 D-Bus 上的 PackageManager 服务执行，它用 polkit 的
+# org.deepin.linglong.PackageManager1.install|uninstall 规则把关，三条默认值都是 auth_admin。
+# 普通用户调用时 polkitd 会去用户桌面会话里找认证代理弹框，网页/手机这种没人守着桌面的
+# 场景只会等到「Error 9: not authorized」——所以这里也走 sudo（root 调用不需要 polkit 授权）。
+NOT_AUTHORIZED = re.compile(r"not authorized|未授权|权限不足", re.IGNORECASE)
+
 
 class Installer:
     def __init__(self, settings, index, report, dry_run=False, yes=False, stream=None, password=None):
@@ -73,6 +79,9 @@ class Installer:
 
     def looks_like_stale_index(self):
         return bool(self.last_output) and bool(STALE_INDEX.search("\n".join(self.last_output)))
+
+    def looks_like_not_authorized(self):
+        return bool(self.last_output) and bool(NOT_AUTHORIZED.search("\n".join(self.last_output)))
 
     def refresh_command(self, source):
         """该来源刷新索引的命令；没有（比如 dnf 会自己更新元数据）就返回 None。"""
@@ -189,8 +198,9 @@ class Installer:
         if source == "snap":
             return self.privileged(["snap", "install", "--", name])
         if source == "linyaps":
-            # 玲珑默认安装到用户目录，不需要提权；仓库由 ll-cli 自身的优先级决定。
-            return ["ll-cli", "install", *(["-y"] if self.yes else []), name]
+            # 玲珑的服务要 polkit 授权（auth_admin），普通用户调用得靠桌面会话里的认证框；
+            # 走 sudo 后由 root 调用，不需要 polkit，也复用网页里的提权密码框。
+            return self.privileged(["ll-cli", "install", *(["-y"] if self.yes else []), name])
         if source == "apt":
             return self.privileged(["apt-get", "install", *(["-y"] if self.yes else []), "--", name])
         if source == "dnf":
@@ -246,6 +256,13 @@ class Installer:
                 if stale:
                     self.report("本地索引里记的版本在镜像上已经不存在了："
                                 "在「更新与升级」里做一次完整升级后再装会更稳。")
+                if source == "linyaps" and self.looks_like_not_authorized():
+                    self.report("玲珑的服务要求管理员认证（polkit），这次调用没通过授权。"
+                                "可以在宿主终端里先执行一次："
+                                f"sudo ll-cli install -y {target}")
+                    self.report("或者按 README「权限」一节写一条 polkit 规则"
+                                "（/etc/polkit-1/rules.d/49-dick-linglong.rules），"
+                                "允许 wheel 组直接安装，之后网页里就不用再授权。")
                 self.report(f"{source} 安装失败（退出码 {code}），尝试下一来源")
             except DickError as error:
                 attempts.append({"source": source, "error": str(error)})
@@ -275,7 +292,8 @@ class Installer:
         if source == "snap":
             return self.privileged(["snap", "remove", name])
         if source == "linyaps":
-            return ["ll-cli", "uninstall", name]
+            # 同安装：卸载也由 PackageManager 服务执行，用 polkit 的 uninstall 规则（auth_admin）。
+            return self.privileged(["ll-cli", "uninstall", name])
         raise DickError(f"不支持卸载来源：{source}")
 
     def native_source(self, sources=None):
