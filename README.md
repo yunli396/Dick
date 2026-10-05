@@ -6,6 +6,22 @@
 
 需要 **Python 3.11+**。实际安装、卸载、升级用于 Linux；其他平台可以使用帮助、解析索引和 `--root` 测试源配置。
 
+### 一键安装
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/yunli396/Dick/main/install.sh | bash
+```
+
+脚本依次做四件事：检查 Python ≥ 3.11 → 在 `~/.local/share/dick/venv` 建一个独立虚拟环境 → 从 GitHub 取最新代码装进去 → 把 `dick` 命令软链到 `~/.local/bin`（不在 `PATH` 里会告诉你怎么加）。全程不需要 sudo，不碰系统 Python；**再跑一次就是升级**。常用参数：`--dir <前缀>` 换安装位置、`--ref <分支或标签>` 换版本、`--from <目录>` 装本地源码，卸载：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/yunli396/Dick/main/install.sh | bash -s -- --uninstall
+```
+
+### 手动安装
+
+从源码目录安装（也可以 `pipx install .`）：
+
 ```bash
 python -m pip install .
 dick --help
@@ -20,6 +36,28 @@ dick web            # 然后打开 http://127.0.0.1:3907
 ```
 
 不安装也可以在项目目录运行 `python -m dick`。项目仅依赖 Python 标准库，包括 `urllib.request`、`sqlite3`、`tomllib`、`tarfile` 和 XML 解析器。
+
+## 界面
+
+`dick web` 出来的样子（截图取自本机，深色主题可切换）：
+
+![精选首页](docs/screenshots/home.png)
+
+首页是每天换一个「今日精选」加分类货架；搜索、详情都一样，索引里没有的包会退回同名搜索：
+
+![搜索结果](docs/screenshots/search.png)
+
+![软件包详情](docs/screenshots/detail.png)
+
+底部任务面板把原生管理器的输出实时回灌进来——安装前先演练命令，确认后才真的执行，需要提权时会问一次 sudo 密码：
+
+![任务面板](docs/screenshots/task.png)
+
+![已安装列表](docs/screenshots/installed.png)
+
+手机上一样用（`dick web --host 0.0.0.0 --tls` 时首次访问确认一次自签证书）：
+
+<img src="docs/screenshots/mobile-home.png" width="360" alt="手机上的精选首页">
 
 ## 命令
 
@@ -197,9 +235,13 @@ timeout = 60
 
 默认每次下载上限 64 MiB、解压上限 256 MiB；大仓库需要调整下载上限，超出解压上限会明确失败。下载使用系统的 HTTPS 证书校验，支持标准代理环境变量；支持 `file://` 方便离线测试。
 
+网页里的「设置」页就是这些配置的可视化入口（来源开关、AI 接口、访问令牌都在这里，保存时只改写对应段落）：
+
+![设置页](docs/screenshots/settings.png)
+
 ## 结构与验证
 
-`discovery.py` 读取源配置，`network.py` 下载与解压，`parsers.py` 解析各类索引，`cache.py` 管理 SQLite，`index.py` 合并本地和 RPC 查询，`local.py` 读取已安装列表，`syntax.py` 归一化 CLI，`install.py` 翻译和执行原生命令，`security.py` 生成自签证书与访问令牌，`cli.py` 组织流程；`web.py` 是 Web GUI 的 HTTP 与业务层，`catalog.py` 放首页的精选目录，`webui/` 放静态界面，`ai.py` 负责可选的翻译接口。
+`discovery.py` 读取源配置，`network.py` 下载与解压，`parsers.py` 解析各类索引，`cache.py` 管理 SQLite，`index.py` 合并本地和 RPC 查询，`local.py` 读取已安装列表，`syntax.py` 归一化 CLI，`install.py` 翻译和执行原生命令，`security.py` 生成自签证书与访问令牌，`cli.py` 组织流程；`web.py` 是 Web GUI 的 HTTP 与业务层，`catalog.py` 放首页的精选目录，`webui/` 放静态界面，`ai.py` 负责可选的翻译接口；根目录的 `install.sh` 是一键安装脚本，`docs/screenshots/` 放 README 用的界面截图。
 
 ```bash
 python -m unittest discover -s tests

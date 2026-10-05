@@ -1491,6 +1491,16 @@ class WebHttpTests(FixtureTest):
             self.assertNotIn(forbidden, script)
         self.assertGreaterEqual(script.count(b"iconSrc("), 6)
 
+    def test_static_assets_keep_the_mobile_layout_from_overflowing(self):
+        """手机上侧栏是静态块，而 grid 的 1fr 最小是 auto：一行不换行的导航会把整页撑出屏幕。"""
+        _, _, styles = self.request("/assets/app.css")
+        self.assertIn(b"@media (max-width: 620px)", styles)
+        # 侧栏必须允许收缩，导航在窄屏改成可横向滚动的一行
+        self.assertIn(b".sidebar { position: static; height: auto; border-right: 0;"
+                      b" border-bottom: 1px solid var(--line); min-width: 0; }", styles)
+        self.assertIn(b".nav { flex-direction: row; gap: 6px; overflow-x: auto;"
+                      b" padding-bottom: 2px; scrollbar-width: none; }", styles)
+
     def test_unknown_routes_return_404(self):
         status, _, body = self.request("/api/nope")
         self.assertEqual(status, 404)
