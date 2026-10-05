@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "dick-cli"
+version = "0.1.0"
+description = "Detective Index Collection Kit: cross-source Linux package discovery"
+requires-python = ">=3.11"
+dependencies = []
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "yunli396", email = "mwh396@gmail.com" }]
+keywords = ["linux", "package-manager", "pacman", "apt", "dnf", "flatpak", "snap", "linyaps", "cli"]
+
+[project.scripts]
+dick = "dick.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["dick*"]
+
+[tool.setuptools.package-data]
+dick = ["webui/*.html", "webui/*.css", "webui/*.js"]

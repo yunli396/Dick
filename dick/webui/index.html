@@ -1,0 +1,289 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="light">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>DICK · 应用商店</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%23D97757'/%3E%3Ctext x='16' y='17' text-anchor='middle' dominant-baseline='central' font-family='Georgia,serif' font-size='18' fill='%23FFF9F3'%3ED%3C/text%3E%3C/svg%3E">
+<link rel="stylesheet" href="/assets/app.css">
+</head>
+<body>
+<div class="app">
+  <aside class="sidebar">
+    <div class="brand">
+      <span class="brand-mark">D</span>
+      <span class="brand-text">
+        <strong>DICK</strong>
+        <small>应用商店</small>
+      </span>
+    </div>
+
+    <nav class="nav" id="nav">
+      <button class="nav-item is-active" data-view="home">
+        <span class="nav-icon">◎</span><span>精选</span>
+      </button>
+      <button class="nav-item" data-view="browse">
+        <span class="nav-icon">▦</span><span>分类浏览</span>
+      </button>
+      <button class="nav-item" data-view="installed">
+        <span class="nav-icon">▤</span><span>已安装</span>
+      </button>
+      <button class="nav-item" data-view="updates">
+        <span class="nav-icon">↻</span><span>更新与升级</span>
+      </button>
+      <button class="nav-item" data-view="settings">
+        <span class="nav-icon">⚙</span><span>设置</span>
+      </button>
+    </nav>
+
+    <div class="side-section">
+      <div class="side-head">
+        <h2>来源</h2>
+        <button class="link" id="scanSources" title="重新探测各来源的原生仓库">扫描</button>
+      </div>
+      <ul class="source-list" id="sourceList"></ul>
+    </div>
+
+    <div class="side-foot">
+      <div class="row-between">
+        <span id="familyLabel">—</span>
+        <button class="link" id="themeToggle" title="切换象牙白 / 暖黑主题">◐ 主题</button>
+      </div>
+      <small id="configLabel">—</small>
+    </div>
+  </aside>
+
+  <main class="main">
+    <header class="topbar">
+      <div class="searchbar">
+        <span class="search-icon">⌕</span>
+        <input id="searchInput" type="search" autocomplete="off" spellcheck="false"
+               placeholder="搜索应用，例如 firefox、gimp、wps">
+        <kbd>/</kbd>
+        <button class="btn btn-primary" id="searchButton">搜索</button>
+      </div>
+      <div class="filters" id="filters" hidden>
+        <div class="chips" id="sourceChips"></div>
+        <label class="switch" title="用 AI 把描述翻译成目标语言">
+          <input type="checkbox" id="translateToggle">
+          <span>AI 翻译</span>
+        </label>
+        <label class="switch" title="搜索时只做精确匹配">
+          <input type="checkbox" id="exactToggle">
+          <span>精确</span>
+        </label>
+        <select id="sortSelect" class="select" title="排序方式">
+          <option value="relevance">相关度</option>
+          <option value="name">名称</option>
+          <option value="source">来源</option>
+        </select>
+      </div>
+    </header>
+
+    <section class="view" id="view-home">
+      <div id="homeHero"></div>
+      <div id="homeShelves"></div>
+      <div class="pad suggest" id="homeSuggest"></div>
+    </section>
+
+    <section class="view" id="view-browse" hidden>
+      <div class="view-head">
+        <h1>分类浏览</h1>
+        <p class="muted">按用途挑选，点开分类看全部应用。</p>
+      </div>
+      <div class="cat-grid" id="categoryGrid"></div>
+    </section>
+
+    <section class="view" id="view-category" hidden>
+      <div class="view-head">
+        <button class="link" id="categoryBack">← 全部分类</button>
+        <h1 id="categoryTitle">分类</h1>
+        <p class="muted" id="categoryMeta"></p>
+      </div>
+      <div class="tile-grid" id="categoryApps"></div>
+    </section>
+
+    <section class="view" id="view-search" hidden>
+      <div class="view-head">
+        <h1 id="searchTitle">搜索</h1>
+        <p class="muted" id="searchMeta">输入关键词开始搜索。</p>
+      </div>
+      <div class="grid" id="results"></div>
+      <div class="pad" id="resultsEmpty" hidden></div>
+    </section>
+
+    <section class="view" id="view-installed" hidden>
+      <div class="view-head">
+        <h1>已安装</h1>
+        <p class="muted" id="installedMeta">读取各来源的已安装列表。</p>
+      </div>
+      <div class="toolbar">
+        <input class="input" id="installedFilter" type="search" placeholder="在本机已安装的包里过滤">
+        <button class="btn" id="installedRefresh">刷新列表</button>
+      </div>
+      <div class="list" id="installedList"></div>
+    </section>
+
+    <section class="view" id="view-updates" hidden>
+      <div class="view-head">
+        <h1>更新与升级</h1>
+        <p class="muted">刷新 DICK 索引缓存，或触发系统包管理器的整机升级。</p>
+      </div>
+      <div class="cards">
+        <article class="card action-card">
+          <h2>刷新索引</h2>
+          <p class="muted">相当于 <code>dick update</code>：重新抓取已启用来源的索引并写入本地缓存。</p>
+          <div class="btn-row">
+            <button class="btn" data-action="update" data-dry="1">演练</button>
+            <button class="btn btn-primary" data-action="update" data-dry="0">刷新</button>
+          </div>
+        </article>
+        <article class="card action-card">
+          <h2>整机升级</h2>
+          <p class="muted">相当于 <code>pacman -Syu</code>：交给系统包管理器升级全部软件包。</p>
+          <div class="btn-row">
+            <button class="btn" data-action="upgrade" data-dry="1">演练</button>
+            <button class="btn btn-danger" data-action="upgrade" data-dry="0">升级</button>
+          </div>
+        </article>
+      </div>
+      <div class="view-head"><h2 class="h2">任务记录</h2></div>
+      <div class="list" id="jobHistory"></div>
+    </section>
+
+    <section class="view" id="view-settings" hidden>
+      <div class="view-head">
+        <h1>设置</h1>
+        <p class="muted">来源开关会写回 TOML 配置文件；AI 设置用于翻译包描述。</p>
+      </div>
+      <div class="cards">
+        <article class="card">
+          <h2>AI 翻译</h2>
+          <p class="muted" id="aiState">未配置。</p>
+          <div class="form-grid">
+            <label>接口地址<input class="input" id="aiBaseUrl" placeholder="https://api.deepseek.com/v1"></label>
+            <label>模型<input class="input" id="aiModel" placeholder="deepseek-chat"></label>
+            <label>API Key<input class="input" id="aiKey" type="password" placeholder="留空表示不修改已保存的密钥"></label>
+            <label>目标语言<input class="input" id="aiTarget" placeholder="中文"></label>
+            <label>超时（秒）<input class="input" id="aiTimeout" type="number" min="1" step="1"></label>
+            <label class="switch" title="关闭后不调用 AI，界面显示原文">
+              <input type="checkbox" id="aiEnabled"><span>启用 AI 翻译</span>
+            </label>
+            <label class="span-2">自定义提示词<textarea class="input" id="aiPrompt" rows="3"
+              placeholder="留空则使用内置提示词"></textarea></label>
+          </div>
+          <div class="btn-row">
+            <button class="btn" id="aiTest">测试连接</button>
+            <button class="btn btn-primary" id="aiSave">保存</button>
+          </div>
+          <p class="muted small">也支持环境变量 <code>DICK_AI_API_KEY</code>、<code>DICK_AI_BASE_URL</code>、<code>DICK_AI_MODEL</code>、<code>DICK_AI_TARGET</code>。</p>
+        </article>
+        <article class="card">
+          <h2>来源启用</h2>
+          <p class="muted">禁用的来源会在搜索、安装、更新与列表里全部跳过。</p>
+          <ul class="source-list large" id="settingsSources"></ul>
+        </article>
+        <article class="card">
+          <h2>运行信息</h2>
+          <dl class="kv" id="runtimeInfo"></dl>
+        </article>
+        <article class="card">
+          <h2>访问令牌</h2>
+          <p class="muted">接口的令牌保护，用来挡住同一网络里的其它设备。服务端的令牌在启动横幅里，也写在配置目录的 <code>web-token</code> 文件里；换设备时把同一个令牌填进去即可。</p>
+          <label class="span-2">本机保存的令牌<input class="input" id="tokenValue" type="password"
+            autocomplete="off" placeholder="还没有保存"></label>
+          <div class="btn-row">
+            <button class="btn btn-primary" id="tokenSave">保存到本机</button>
+            <button class="btn" id="tokenClear">清除</button>
+          </div>
+          <p class="muted small">令牌只存在浏览器 localStorage 里，不会发给第三方；清除后需要重新输入才能访问接口。</p>
+        </article>
+      </div>
+    </section>
+  </main>
+</div>
+
+<div class="gate" id="tokenGate" hidden>
+  <form class="gate-card" id="tokenForm">
+    <h1>需要访问令牌</h1>
+    <p class="muted">DICK 的接口开了令牌保护，避免同网络里的其它设备随意安装或卸载软件。令牌在启动它的终端横幅里（也写在配置目录的 <code>web-token</code> 文件里）。</p>
+    <input class="input" id="tokenInput" type="password" autocomplete="off" placeholder="粘贴访问令牌">
+    <div class="btn-row">
+      <button class="btn btn-primary" type="submit">进入</button>
+    </div>
+    <p class="muted small" id="tokenError"></p>
+  </form>
+</div>
+
+<div class="gate" id="passGate" hidden>
+  <form class="gate-card" id="passForm">
+    <h1>需要提权</h1>
+    <p class="muted">这次操作要调用 <code>sudo</code>。密码只会在本次任务里通过 stdin 交给 sudo，不写入磁盘、不进日志，任务结束就丢弃。这台机器如果配过免密，留空直接执行即可。</p>
+    <label class="span-2">sudo 密码<input class="input" id="passInput" type="password"
+      autocomplete="off" placeholder="留空 = 已经配置了免密"></label>
+    <p class="muted small" id="passError"></p>
+    <div class="btn-row">
+      <button class="btn btn-primary" type="submit">执行</button>
+      <button class="btn" type="button" id="passCancel">取消</button>
+    </div>
+  </form>
+</div>
+
+<div class="drawer" id="drawer" hidden>
+  <div class="drawer-backdrop" data-close="drawer"></div>
+  <div class="drawer-panel" role="dialog" aria-modal="true">
+    <button class="icon-btn drawer-close" data-close="drawer">✕</button>
+    <div id="drawerBody"></div>
+  </div>
+</div>
+
+<div class="jobdock" id="jobdock" hidden>
+  <section class="jobpanel" id="jobpanel" hidden aria-label="任务日志">
+    <header>
+      <strong id="jobTitle">任务</strong>
+      <span class="badge" id="jobStatus">运行中</span>
+      <button class="icon-btn" id="jobCollapse" title="收起任务框">✕</button>
+    </header>
+    <pre class="joblog" id="jobLog"></pre>
+    <footer class="btn-row" id="jobActions"></footer>
+  </section>
+  <div class="jobtab" id="jobTab" role="button" tabindex="0" aria-expanded="false"
+       title="展开/收起任务框">
+    <span class="jobtab-state" id="jobTabState">◷</span>
+    <span class="jobtab-text" id="jobTabText">任务记录</span>
+    <button class="icon-btn jobtab-close" id="jobTabClose" title="隐藏任务框">✕</button>
+  </div>
+</div>
+
+<div class="toasts" id="toasts"></div>
+
+<template id="tpl-package">
+  <article class="pkg">
+    <img class="pkg-icon" alt="" loading="lazy">
+    <div class="pkg-body">
+      <h3 class="pkg-name"></h3>
+      <p class="pkg-desc"></p>
+      <div class="pkg-meta"></div>
+    </div>
+    <div class="pkg-actions"></div>
+  </article>
+</template>
+
+<template id="tpl-tile">
+  <article class="tile">
+    <button class="tile-main" type="button">
+      <img class="tile-icon" alt="" loading="lazy">
+      <span class="tile-text">
+        <span class="tile-name"></span>
+        <span class="tile-tagline"></span>
+        <span class="tile-meta"></span>
+      </span>
+    </button>
+    <div class="tile-foot"></div>
+  </article>
+</template>
+
+<script src="/assets/app.js"></script>
+</body>
+</html>

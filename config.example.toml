@@ -1,0 +1,54 @@
+[syntax]
+prefer = "auto"
+
+# 省略 [sources] enabled 时全部来源启用；dick source enable/disable 会就地更新这一行。
+[sources]
+enabled = ["pacman", "aur", "apt", "dnf", "flatpak", "linyaps", "snap"]
+
+# snap 固定垫底：这里怎么写都会被挪到最后一名，漏写也会自动补上（它是兜底来源）。
+[priority.arch]
+order = ["pacman", "aur", "flatpak", "linyaps", "snap"]
+
+[priority.debian]
+order = ["apt", "flatpak", "linyaps", "snap"]
+
+[priority.fedora]
+order = ["dnf", "flatpak", "linyaps", "snap"]
+
+[cache]
+ttl = 900
+
+[network]
+timeout = 20
+max_bytes = 67108864
+workers = 4
+
+# dick web 的监听地址。默认只绑定本机回环，端口默认 3907。
+# 绑到 0.0.0.0 给手机/别的电脑用时，务必保持下面 tls + token 开着：
+# 界面里有 sudo 密码框，明文 HTTP 走局域网会把密码暴露给同网段的人。
+[web]
+host = "127.0.0.1"
+port = 3907
+# tls = true 会用 openssl 在配置目录旁的 tls/ 里生成自签证书（首次浏览会警告一次），
+# 命令行上的 --tls / --no-tls 优先。cert / key 可以指向自己的证书。
+# tls = false
+# cert = "/etc/dick/server.crt"
+# key = "/etc/dick/server.key"
+# 访问令牌：留空则首次启动自动生成并写入同目录的 web-token 文件。
+# 命令行上的 --token / --no-token 优先（--no-token 只在 127.0.0.1 上这么用）。
+# token = ""
+
+# 可选：网页里的 AI 翻译（设置页保存后会写回这一段）。
+# 兼容 OpenAI 的 /chat/completions 与 Anthropic 的 /messages；
+# DICK_AI_API_KEY、DICK_AI_BASE_URL、DICK_AI_MODEL、DICK_AI_TARGET 等环境变量优先。
+[ai]
+enabled = false
+base_url = "https://api.deepseek.com/v1"
+model = "deepseek-chat"
+api_key = ""
+target = "中文"
+timeout = 60
+# prompt = "自定义系统提示词；留空使用内置的翻译提示词"
+
+# [dnf]
+# releasever = "43"
