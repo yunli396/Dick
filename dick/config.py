@@ -9,17 +9,21 @@ import tomllib
 from .models import DickError
 
 
-SOURCES = ("pacman", "aur", "apt", "dnf", "flatpak", "linyaps", "snap")
+SOURCES = ("pacman", "aur", "apt", "dnf", "apk", "flatpak", "linyaps", "guix", "nixpkgs", "snap")
 # snap 永远排在最后（见 Settings 里的强制重排）：包体积大、首次启动慢、桌面集成最差，
 # 只在其它来源都没有的时候才兜底。
 LAST_SOURCE = "snap"
+# 每个家族默认的降级顺序：先用原生管理器，再是跨发行版的 flatpak / 玲珑；guix、nixpkgs
+# 这类自带 profile 的用户级管理器排在它们之后、snap 之前。
 PRIORITIES = {
-    "arch": ["pacman", "aur", "flatpak", "linyaps", "snap"],
-    "debian": ["apt", "flatpak", "linyaps", "snap"],
-    "fedora": ["dnf", "flatpak", "linyaps", "snap"],
-    "other": ["apt", "dnf", "pacman", "flatpak", "linyaps", "snap"],
+    "arch": ["pacman", "aur", "flatpak", "linyaps", "guix", "nixpkgs", "snap"],
+    "debian": ["apt", "flatpak", "linyaps", "guix", "nixpkgs", "snap"],
+    "fedora": ["dnf", "flatpak", "linyaps", "guix", "nixpkgs", "snap"],
+    "alpine": ["apk", "flatpak", "linyaps", "guix", "nixpkgs", "snap"],
+    "other": ["apt", "dnf", "pacman", "apk", "flatpak", "linyaps", "guix", "nixpkgs", "snap"],
 }
-EXECUTABLES = {"apt": "apt-get", "linyaps": "ll-cli"}
+# 大多数来源的可用性看同名可执行文件，这里只列出名字不一致的。
+EXECUTABLES = {"apt": "apt-get", "linyaps": "ll-cli", "nixpkgs": "nix"}
 
 
 def system_family(root):
@@ -34,6 +38,8 @@ def system_family(root):
         identifiers = set()
     if identifiers & {"arch", "manjaro", "endeavouros"}:
         return "arch"
+    if identifiers & {"alpine"}:
+        return "alpine"
     if identifiers & {"debian", "ubuntu"}:
         return "debian"
     if identifiers & {"fedora", "rhel", "centos", "rocky", "almalinux"}:

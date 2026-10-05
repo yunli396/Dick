@@ -90,12 +90,19 @@ dick web            # 然后打开 http://127.0.0.1:3907
 | Flatpak | `flatpak remotes`、`flatpak remote-ls --json`（老版本退回 TSV） | `flatpak list --app` / `flatpak uninstall` | `flatpak install remote ID` | 已配置远端的应用，默认 Flatpak 安装作用域；`remote-ls` 不给描述与版本（1.18 起不认识的列会被静默丢弃），所以描述退回应用显示名 |
 | APT | `.list` / Deb822 `.sources` → 各组件与架构的 `Packages` | `dpkg-query -W` / `apt-get remove\|purge` | `apt-get install` | 基础实现，xz/gzip/未压缩索引、平铺仓库、多文件合并 |
 | DNF | `.repo` → `repomd.xml` → primary XML | `rpm -qa` / `dnf remove` | `dnf install` | 基础实现，baseurl/mirrorlist/metalink、元数据 checksum、架构筛选 |
+| APK（Alpine） | `/etc/apk/repositories` → `{架构}/APKINDEX.tar.gz` 内的 `APKINDEX` | `/lib/apk/db/installed` / `apk del` | `apk add --no-cache` | Alpine 原生索引，解析单字母字段（`P`/`V`/`T`/`A`）；`@tag` 标记会被忽略，仓库名取 URL 末两段（`v3.20/main`） |
 | Snap | `snap find` 的列表输出 | `snap list` / `snap remove` | `snap install` | 已安装 Snap 时按需查询，TTL 缓存 |
 | Linyaps（如意玲珑） | `ll-cli --json search` 的 JSON | `ll-cli --json list --type=app` / `ll-cli uninstall` | `ll-cli install ID` | 已安装 `ll-cli` 时按需查询，TTL 缓存；仓库来自 `ll-cli --json repo show`，读取失败时退化为单一 `linglong` 仓库 |
+| Guix | `guix package -A <正则>` 的四列表格 | `guix package --list-installed` / `guix remove` | `guix install` | 已安装 `guix` 时按需查询，TTL 缓存；查询按包名匹配（大小写不敏感），`-A` 不输出描述，所以描述列为空；装进用户自己的 profile，不加 sudo |
+| Nixpkgs | `nix search --json nixpkgs <正则>` | `nix profile list --json` / `nix profile remove` | `nix profile install nixpkgs#名称` | 已安装 Nix 时按需查询，TTL 缓存；需要 Nix 2.4+ 的新 CLI（flake），未开启 `experimental-features = nix-command flakes` 时会给出提示；属性路径去掉 `legacyPackages.<系统>.` 前缀当名称；装进用户 profile，不加 sudo |
 
-Pacman/APT/DNF 搜索不执行 `pacman -Ss`、`apt search` 或 `dnf search`。Flatpak 的 OSTree/AppStream 数据需要额外协议和解析依赖，Snap 商店和 Linyaps 仓库也没有本原型采用的稳定公开全量索引格式（Linyaps 依赖 `ll-cli` 自己输出 JSON），所以按需求允许的例外使用原生命令。Flatpak/Snap/Linyaps 版本过旧、无远端或输出完全无法解析时会报告错误（Flatpak 的列数变化会被容忍，见上表）。
+Pacman/APT/DNF/APK 搜索不执行 `pacman -Ss`、`apt search`、`dnf search` 或 `apk search`。Flatpak 的 OSTree/AppStream 数据需要额外协议和解析依赖，Snap 商店、Linyaps 仓库、Guix 与 Nixpkgs 也没有本原型采用的稳定公开全量索引格式（Linyaps 依赖 `ll-cli` 自己输出 JSON，Guix 用 `guix package -A`，Nixpkgs 用 `nix search --json`），所以按需求允许的例外使用原生命令。Flatpak/Snap/Linyaps 版本过旧、无远端或输出完全无法解析时会报告错误（Flatpak 的列数变化会被容忍，见上表）。
 
-AUR 在 Arch 上没有独立数据库，`pacman -Qm` 列出的是同步数据库之外的外来包（AUR 或手工构建），因此与 `pacman -Qn` 分开统计，同一个包不会被列出两次。Flatpak/Snap/Linyaps 只参与搜索、列表、安装和卸载；`upgrade` 只作用于 pacman/apt/dnf 这类系统管理器。
+AUR 在 Arch 上没有独立数据库，`pacman -Qm` 列出的是同步数据库之外的外来包（AUR 或手工构建），因此与 `pacman -Qn` 分开统计，同一个包不会被列出两次。Flatpak/Snap/Linyaps/Guix/Nixpkgs 只参与搜索、列表、安装和卸载；`upgrade` 只作用于 pacman/apt/dnf/apk 这类系统管理器。
+
+APK 的已安装清单直接读 `/lib/apk/db/installed`（字段与 `APKINDEX` 相同），比跑 `apk info` 更稳，配 `--root` 也能用。Alpine 家族默认优先级是 `apk → flatpak → linyaps → guix → nixpkgs → snap`。
+
+APK 的索引格式用真实的 Alpine `v3.20` 仓库验证过（`main`/`community` 的 `APKINDEX.tar.gz`）。**Guix 与 Nixpkgs 这两个来源没有在本机实测**：开发机上没有 `guix` / `nix`，解析器是按上游输出格式写的（`guix package -A` 的四列表格、`nix search --json` 与 `nix profile list --json` 的 JSON），并尽量宽容，出错时会把原生命令的原始输出带进错误信息。用它们之前请先用 `--dry-run` 看一眼命令。
 
 APT 的 `.sources` 支持 `Types`、`Enabled`、`URIs`、`Suites`、`Components`、`Architectures`；高级架构增减字段、APT pinning、所有发行版特有配置不在原型范围内。DNF 展开 `$basearch`、`$arch`、`$releasever`；其他变量会报错。DNF **尚未复现模块流过滤**，发现模块元数据时会提示：搜索结果可能包含未启用流中的包，实际可安装性由原生 dnf 判断。Python 3.14 使用标准库 zstd；Python 3.11–3.13 使用系统 `zstd` 命令。不声称完全兼容全部镜像格式。
 
@@ -121,7 +128,7 @@ dick source scan --json
 
 SQLite 默认在 `$XDG_CACHE_HOME/dick/index.sqlite3`，未设置时为 `~/.cache/dick/index.sqlite3`。第一次搜索缺少本地快照时自动拉取所选来源的索引；后续直接查本地快照，通过 `dick update` 手动更新。刷新逐仓库事务提交，下载或解析失败会保留该仓库上一次成功快照，其他仓库可以继续刷新。已移除或已禁用的源不参与搜索。
 
-AUR/Snap/Linyaps 没有全量本地索引，查询结果按关键词缓存，`dick update` 会清空它们的查询缓存。查询失败会打印警告，跨源搜索仍展示成功来源；JSON 的 `errors` 字段保留失败信息。完整刷新有任意失败时返回非零状态。
+AUR/Snap/Linyaps/Guix/Nixpkgs 没有全量本地索引，查询结果按关键词缓存，`dick update` 会清空它们的查询缓存。查询失败会打印警告，跨源搜索仍展示成功来源；JSON 的 `errors` 字段保留失败信息。完整刷新有任意失败时返回非零状态。
 
 ## 本机列表与卸载
 
@@ -144,29 +151,32 @@ dick remove firefox --source flatpak --yes
 - 非交互（管道、`--json`）遇到多个候选会报错并列出全部候选，要求用 `--source` 或完整名称指定，不会自行猜测。
 - 非交互卸载必须显式给出 `--yes`，否则报错，避免脚本意外删除软件；`--dry-run` 只预览命令，因此不需要 `--yes`。
 
-`--deep` 翻译为 Pacman `-Rns`、APT `purge --autoremove`、DNF 的依赖清理配置、Flatpak `--delete-data`；各工具语义不完全相同。Flatpak、Snap、Linyaps 的卸载直接交给各自工具，玲珑不需要 `sudo`。
+`--deep` 翻译为 Pacman `-Rns`、APT `purge --autoremove`、DNF 的依赖清理配置、Flatpak `--delete-data`；各工具语义不完全相同。Flatpak、Snap、Guix、Nixpkgs 的卸载直接交给各自工具，不需要 `sudo`。玲珑在 DICK 里走 `sudo`（原因见下面的权限说明）。APK 用 `apk del`，Alpine 没有单独的 purge 概念，所以 `--deep` 对它没有额外效果。
 
 ## 安装与降级
 
-Arch 默认 `pacman → aur → flatpak → linyaps → snap`；Debian 默认 `apt → flatpak → linyaps → snap`；Fedora 默认 `dnf → flatpak → linyaps → snap`。**snap 是固定垫底的兜底来源**：不管 `priority.order` 怎么写，它都会被挪到最后一名；配置里漏掉它也会自动补上（体积大、首次启动慢、桌面集成最差，只在其它来源都没有时才用）。逐来源查询准确名称，跳过不存在或不可执行的来源；原生命令失败后尝试下一来源。Ctrl+C 或信号退出会停止降级。多包安装逐包处理，结果逐项报告。
+Arch 默认 `pacman → aur → flatpak → linyaps → guix → nixpkgs → snap`；Debian 默认 `apt → flatpak → linyaps → guix → nixpkgs → snap`；Fedora 默认 `dnf → flatpak → linyaps → guix → nixpkgs → snap`；Alpine 默认 `apk → flatpak → linyaps → guix → nixpkgs → snap`。**snap 是固定垫底的兜底来源**：不管 `priority.order` 怎么写，它都会被挪到最后一名；配置里漏掉它也会自动补上（体积大、首次启动慢、桌面集成最差，只在其它来源都没有时才用）。手动写了 `[priority.<家族>] order` 的家族只会按列出的顺序降级，新增来源要自己加进去。逐来源查询准确名称，跳过不存在或不可执行的来源；原生命令失败后尝试下一来源。Ctrl+C 或信号退出会停止降级。多包安装逐包处理，结果逐项报告。
 
 ```bash
 dick install firefox
 dick install firefox --source pacman
 dick install org.mozilla.firefox --source flatpak
 dick install org.deepin.calculator --source linyaps
+dick install 7zip --source apk
+dick install firefox --source guix
+dick install firefox --source nixpkgs
 dick install firefox --dry-run --json
 ```
 
 Flatpak 优先匹配完整应用 ID，也支持唯一的 ID 末段别名：`firefox` 可以定位 `org.mozilla.firefox`。多个不同 ID 匹配时要求使用完整 ID。Linyaps 同样接受完整应用 ID、反向 DNS 末段或显示名（`calculator`、`deepin-calculator`、`org.deepin.calculator` 都可定位），多个 ID 匹配时要求完整 ID；安装命令只传应用 ID，具体仓库由 `ll-cli` 自身的仓库优先级解析。其他来源要求同名；此原型不维护“同一软件在不同生态中的所有别名”数据库，也不自动选择 Snap classic 模式等额外权限。
 
-`--dry-run` 显示要执行的原生命令；仍可能联网查询、更新 DICK 缓存。它不调用安装、卸载、升级命令，也无法预测这些命令真正执行后会不会失败。AUR 安装需要事先安装 `paru` 或 `yay`，并以普通用户运行。系统管理器（pacman/apt/dnf）需要 root 或 sudo；Flatpak 自己处理权限；玲珑（Linyaps）的安装与卸载由系统 D-Bus 上的 `PackageManager` 服务执行，该服务用 polkit 的 `org.deepin.linglong.PackageManager1.install|uninstall` 规则把关（三条默认值都是 `auth_admin`，普通用户调用要靠桌面会话里的认证框），所以 DICK 同样给它加 `sudo`——否则从手机点「获取」只会等到 `Error 9: not authorized`。
+`--dry-run` 显示要执行的原生命令；仍可能联网查询、更新 DICK 缓存。它不调用安装、卸载、升级命令，也无法预测这些命令真正执行后会不会失败。AUR 安装需要事先安装 `paru` 或 `yay`，并以普通用户运行。系统管理器（pacman/apt/dnf/**apk**）需要 root 或 sudo；Flatpak 自己处理权限；Guix 与 Nixpkgs 装进当前用户的 profile（`guix install`、`nix profile install`），**不加 sudo**；玲珑（Linyaps）的安装与卸载由系统 D-Bus 上的 `PackageManager` 服务执行，该服务用 polkit 的 `org.deepin.linglong.PackageManager1.install|uninstall` 规则把关（三条默认值都是 `auth_admin`，普通用户调用要靠桌面会话里的认证框），所以 DICK 同样给它加 `sudo`——否则从手机点「获取」只会等到 `Error 9: not authorized`。
 
 **DICK 的索引与原生管理器本地数据库是两套数据。** `dick update` 只更新 DICK，原生安装仍使用管理器自身的数据库、签名、依赖和优先级规则。Arch 请保持系统正常滚动更新（`dick upgrade` 会调用 `sudo pacman -Syu`）；APT 如需同步原生数据库使用 `sudo apt-get update`。DICK 不以单独的原生 `pacman -Sy` 自动引入局部升级风险。
 
 刷新会并行下载和解析多个仓库索引，默认并发数为 4，可用 `--jobs 2` 或配置文件中的 `[network] workers = 2` 调整。索引写入 SQLite 时使用事务和线程锁；原生安装、卸载和升级保持串行，因为 pacman、apt、dnf 各自会锁定系统数据库。交互终端会在 stderr 显示一个进度条：Arch 使用 pacman 风格的 `:: Synchronizing package databases...`，Debian 使用 apt 风格的 `Get:`，Fedora 使用 dnf 风格的仓库刷新行。`--json` 不输出进度字符，保证 stdout 始终是有效 JSON。
 
-`upgrade` 只作用于系统管理器，翻译为 Pacman `-Syu`、APT `upgrade` 或 DNF `upgrade`；没有可用的系统管理器时会明确报错。其他动作不支持的来源会跳过而不是报错。
+`upgrade` 只作用于系统管理器，翻译为 Pacman `-Syu`、APT `upgrade`、DNF `upgrade` 或 Alpine `apk -U upgrade`（`-U` 会先刷新索引再升级）；没有可用的系统管理器时会明确报错。其他动作不支持的来源会跳过而不是报错。Guix 与 Nixpkgs 也有各自的整机升级方式（`guix pull`、`nix-channel --update` 等），但本原型不代为调用。
 
 索引是搜索线索，原型不独立验证 APT Release 签名或 Pacman 数据库签名。安装认证由原生管理器负责。失败的原生安装可能已经下载或改变部分状态，自动降级不会回滚前一管理器的操作；建议先检查 `--dry-run`，默认保留交互确认。
 
@@ -178,9 +188,9 @@ Flatpak 优先匹配完整应用 ID，也支持唯一的 ID 末段别名：`fire
 - 分类浏览：侧栏第二个入口列出全部分类、图标与收录数量，点进去是完整网格；详情页底部还有「同分类推荐」。
 - 来源：侧栏列出全部来源、启用开关与已识别仓库；「重新扫描」按钮等同于 `dick source scan`，会真正调用 `flatpak remotes`、`ll-cli repo show` 等原生命令。
 - 搜索：顶部搜索框随时可用，支持来源过滤、精确匹配、分来源排序，结果卡片显示来源、版本、仓库与描述，标出哪些已安装；筛选条只在搜索结果页出现。
-- 已安装：读取各管理器的本机数据库（`pacman -Qn` / `-Qm`、`dpkg-query`、`rpm -qa`、`flatpak list`、`snap list`、`ll-cli list`）。
+- 已安装：读取各管理器的本机数据库（`pacman -Qn` / `-Qm`、`dpkg-query`、`rpm -qa`、`flatpak list`、`snap list`、`ll-cli list`、APK 的 `/lib/apk/db/installed`、`guix package --list-installed`、`nix profile list --json`）。
 - 变更：安装、卸载、升级、刷新索引都先在网页里演练并展示命令与日志；接口层不带 `dry_run` 或 `confirm` 的变更请求会被直接拒绝，所以**每次真实系统变更都必须先预览再确认**。卸载会先列出本机的同名/相似名候选让人选择。原生命令的 stdout/stderr（含下载进度、`pacman`/`apt` 的输出）会实时流进任务日志，失败时能直接看到原生工具的原话。
-- 权限（网页里的提权）：网页任务没有终端，pacman / apt / dnf 的安装、卸载、升级需要提权。点「确认执行」时会弹出密码框，填入 sudo 密码即可——密码只通过 stdin 交给 `sudo -S`，不落盘、不进日志、任务结束就丢弃；密码错误会在日志里说清并允许重试，连续错 5 次会冷却 60 秒。也可以完全不用密码框：在宿主终端里配一次免密（`echo "$USER ALL=(root) NOPASSWD: /usr/sbin/pacman, /usr/bin/pacman" | sudo tee /etc/sudoers.d/dick >/dev/null && sudo chmod 440 /etc/sudoers.d/dick`；`/usr/sbin` 常是 `/usr/bin` 的软链，所以两个路径都写上），日志里也会打印这条可照抄的命令。AUR（`paru` / `yay`）与 Flatpak 由各自工具处理权限，不需要提权；**Linyaps 需要**：玲珑的 `PackageManager` 服务用 polkit 的 `org.deepin.linglong.PackageManager1.install|uninstall` 规则把关（默认 `auth_admin`），普通用户调用要靠桌面会话里的认证框，手机/网页这种没人守着桌面的场景只会等到 `Error 9: not authorized`，所以 DICK 也给它加 `sudo`。如果不想填密码、也不想给 `sudo` 免密，可以改用一条 polkit 规则让 `wheel` 组直接安装与卸载玲珑应用：把 `polkit.addRule(function (action, subject) { if (action.id.indexOf("org.deepin.linglong.PackageManager1.") === 0 && subject.isInGroup("wheel")) { return polkit.Result.YES; } });` 写进 `/etc/polkit-1/rules.d/49-dick-linglong.rules`，再 `sudo systemctl reload polkit` 生效（等效于把玲珑应用的安装权交给这个组，请自行权衡）。CLI 在真终端里跑（含 `--json`）不受这条限制，`sudo` 照常自己弹密码提示。
+- 权限（网页里的提权）：网页任务没有终端，pacman / apt / dnf / **apk** 的安装、卸载、升级需要提权。点「确认执行」时会弹出密码框，填入 sudo 密码即可——密码只通过 stdin 交给 `sudo -S`，不落盘、不进日志、任务结束就丢弃；密码错误会在日志里说清并允许重试，连续错 5 次会冷却 60 秒。也可以完全不用密码框：在宿主终端里配一次免密（`echo "$USER ALL=(root) NOPASSWD: /usr/sbin/pacman, /usr/bin/pacman" | sudo tee /etc/sudoers.d/dick >/dev/null && sudo chmod 440 /etc/sudoers.d/dick`；`/usr/sbin` 常是 `/usr/bin` 的软链，所以两个路径都写上），日志里也会打印这条可照抄的命令。AUR（`paru` / `yay`）与 Flatpak 由各自工具处理权限，不需要提权；**Guix 与 Nixpkgs 也不需要**（分别装进 `~/.guix-profile` 和 `~/.nix-profile`，本来就不该用 root 跑）；**Linyaps 需要**：玲珑的 `PackageManager` 服务用 polkit 的 `org.deepin.linglong.PackageManager1.install|uninstall` 规则把关（默认 `auth_admin`），普通用户调用要靠桌面会话里的认证框，手机/网页这种没人守着桌面的场景只会等到 `Error 9: not authorized`，所以 DICK 也给它加 `sudo`。如果不想填密码、也不想给 `sudo` 免密，可以改用一条 polkit 规则让 `wheel` 组直接安装与卸载玲珑应用：把 `polkit.addRule(function (action, subject) { if (action.id.indexOf("org.deepin.linglong.PackageManager1.") === 0 && subject.isInGroup("wheel")) { return polkit.Result.YES; } });` 写进 `/etc/polkit-1/rules.d/49-dick-linglong.rules`，再 `sudo systemctl reload polkit` 生效（等效于把玲珑应用的安装权交给这个组，请自行权衡）。CLI 在真终端里跑（含 `--json`）不受这条限制，`sudo` 照常自己弹密码提示。
 - 图标：按需从 Flathub（`dl.flathub.org` 直链与 `flathub.org/api/v2/search`）和 Snapcraft（`api.snapcraft.io`）抓取，缓存在 `cache_dir/icons`（命中 30 天、未命中 6 小时），抓不到时生成暖色字母头像。
 - AI 翻译：填好 OpenAI 兼容或 Anthropic 的 `base_url`、`model`、API key 后，可把结果里的包描述翻译成目标语言（默认「中文」），译文按「模型 + 目标语言 + 原文」缓存在 `cache_dir/translations`，同一段描述只翻译一次。
 - 安全：默认只绑定回环地址，但仍然接一层访问令牌（首次启动自动生成 12 位十六进制，写在配置目录的 `web-token` 里并打印在启动横幅上；`--token` 指定、`--no-token` 关闭）。打开 `0.0.0.0` 给局域网时务必同时开 `--tls`：界面里有 sudo 密码框，明文 HTTP 会把密码暴露给同网段的人。前端把令牌存在 `localStorage` 并随请求走 `X-Dick-Token` 头（图片等 `GET` 用 `?token=`），静态页面本身不带数据、不需要令牌即可加载；令牌不对时接口回 `401` 并弹出入令牌的界面。前端自己「加密」再发明文没有意义（页面、密钥与密码走同一根网线，谁都能改页面），所以要传输安全就只有 TLS 这一条路。
@@ -196,14 +206,18 @@ Flatpak 优先匹配完整应用 ID，也支持唯一的 ID 末段别名：`fire
 prefer = "auto"
 
 [sources]
-enabled = ["pacman", "aur", "flatpak", "linyaps"]
+enabled = ["pacman", "aur", "flatpak", "linyaps", "guix", "nixpkgs"]
 
 # snap 无论怎么写都会被挪到最后一名（漏写会自动补上），它是兜底来源。
+# 手动写 order 的家族只会按列出的顺序降级，新增来源要自己加进来。
 [priority.arch]
-order = ["pacman", "aur", "flatpak", "linyaps", "snap"]
+order = ["pacman", "aur", "flatpak", "linyaps", "guix", "nixpkgs", "snap"]
 
 [priority.debian]
-order = ["apt", "flatpak", "linyaps", "snap"]
+order = ["apt", "flatpak", "linyaps", "guix", "nixpkgs", "snap"]
+
+[priority.alpine]
+order = ["apk", "flatpak", "linyaps", "guix", "nixpkgs", "snap"]
 
 [cache]
 ttl = 900

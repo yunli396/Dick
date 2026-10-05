@@ -13,6 +13,7 @@ from .models import DickError
 REFRESH_COMMANDS = {
     "pacman": ["pacman", "-Sy"],
     "apt": ["apt-get", "update"],
+    "apk": ["apk", "update"],
 }
 
 STALE_INDEX = re.compile(
@@ -205,6 +206,14 @@ class Installer:
             return self.privileged(["apt-get", "install", *(["-y"] if self.yes else []), "--", name])
         if source == "dnf":
             return self.privileged(["dnf", "install", *(["-y"] if self.yes else []), "--", name])
+        if source == "apk":
+            # apk 默认就是非交互的（要它提问才加 -i），--no-cache 保证每次都取最新索引。
+            return self.privileged(["apk", "add", "--no-cache", name])
+        if source == "guix":
+            # guix 装进用户自己的 profile，不需要 root。
+            return ["guix", "install", name]
+        if source == "nixpkgs":
+            return ["nix", "profile", "install", f"nixpkgs#{name}"]
         raise DickError(f"不支持安装来源：{source}")
 
     def install(self, target, sources):
@@ -294,15 +303,23 @@ class Installer:
         if source == "linyaps":
             # 同安装：卸载也由 PackageManager 服务执行，用 polkit 的 uninstall 规则（auth_admin）。
             return self.privileged(["ll-cli", "uninstall", name])
+        if source == "apk":
+            # apk 没有 purge 概念：del 就是删包，是否连带清理依赖由 apk 自己决定。
+            return self.privileged(["apk", "del", name])
+        if source == "guix":
+            return ["guix", "remove", name]
+        if source == "nixpkgs":
+            return ["nix", "profile", "remove", name]
         raise DickError(f"不支持卸载来源：{source}")
 
     def native_source(self, sources=None):
-        preferred = {"arch": "pacman", "debian": "apt", "fedora": "dnf"}.get(self.settings.family)
+        preferred = {"arch": "pacman", "debian": "apt", "fedora": "dnf",
+                     "alpine": "apk"}.get(self.settings.family)
         ordered = list(dict.fromkeys([preferred, *self.settings.priority]))
         for source in ordered:
-            if source in {"pacman", "apt", "dnf"} and (sources is None or source in sources) and self.settings.available(source):
+            if source in {"pacman", "apt", "dnf", "apk"} and (sources is None or source in sources) and self.settings.available(source):
                 return source
-        raise DickError("未找到可用的系统包管理器；upgrade 只作用于 pacman/apt/dnf")
+        raise DickError("未找到可用的系统包管理器；upgrade 只作用于 pacman/apt/dnf/apk")
 
     def upgrade_command(self, sources=None):
         source = self.native_source(sources)
@@ -310,4 +327,7 @@ class Installer:
             return self.privileged(["pacman", "-Syu", *(["--noconfirm"] if self.yes else [])])
         if source == "apt":
             return self.privileged(["apt-get", "upgrade", *(["-y"] if self.yes else [])])
+        if source == "apk":
+            # -U 先更新索引再升级，等价于 apk update && apk upgrade。
+            return self.privileged(["apk", "-U", "upgrade"])
         return self.privileged(["dnf", "upgrade", *(["-y"] if self.yes else [])])

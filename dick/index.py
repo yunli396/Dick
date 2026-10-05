@@ -7,11 +7,21 @@ import xml.etree.ElementTree as ET
 
 from .discovery import english_locale, native_output
 from .models import DickError, Package
-from .parsers import apt_packages, dnf_packages, pacman_packages
+from .parsers import (apk_packages, apt_packages, dnf_packages, pacman_packages,
+                      strip_nix_attribute)
 
 
 # Sources without a stable public index: queried on demand and kept in the TTL query cache.
-QUERY_SOURCES = ("aur", "snap", "linyaps")
+QUERY_SOURCES = ("aur", "snap", "linyaps", "guix", "nixpkgs")
+
+# guix / nix 的按需查询都把关键词当成正则表达式；Nix 用的是 std::regex、Guix 用 POSIX
+# 扩展正则，用户输入里的元字符（含 `+` 或 `(` 的包名很常见）会被当成语法，这里一律转义成字面量。
+_REGEXP_SPECIAL = set("\\.^$*+?()[]{}|")
+
+
+def literal_regexp(text):
+    return "".join("\\" + character if character in _REGEXP_SPECIAL else character
+                   for character in text)
 
 
 class Index:
@@ -113,7 +123,8 @@ class Index:
     def refresh_repository(self, repository):
         if repository.source == "flatpak":
             return self.cache.replace(repository, self._flatpak_packages(repository))
-        parsers = {"pacman": pacman_packages, "apt": apt_packages, "dnf": dnf_packages}
+        parsers = {"pacman": pacman_packages, "apt": apt_packages, "dnf": dnf_packages,
+                   "apk": apk_packages}
         failures = []
         urls = self._dnf_urls(repository) if repository.source == "dnf" else repository.urls
         for url in urls:
@@ -254,6 +265,75 @@ class Index:
             candidates.add(record["name"].casefold())
         return lowered in candidates
 
+    def _guix(self, query, exact):
+        """guix 没有可下载的公共索引，只能现问 `guix package -A`。
+
+        输出是 pretty-print-table 的四列表格（name version outputs location），没有描述列；
+        匹配由 guix 自己做（大小写不敏感、只匹配名称），exact 时这里再筛一遍。
+        """
+        key = ("info:" if exact else "search:") + query
+        cached = self.cache.query_get("guix", key, self.settings.ttl)
+        if cached is not None:
+            return cached
+        output = native_output(["guix", "package", "-A", literal_regexp(query)],
+                               timeout=max(180, int(self.settings.timeout) * 4))
+        lowered = query.casefold()
+        packages = []
+        for line in output.splitlines():
+            if not line.strip():
+                continue
+            fields = line.split()
+            if len(fields) < 2:
+                raise DickError(f"guix 输出不是预期的四列表格：{line.strip()[:120]}")
+            if exact and fields[0].casefold() != lowered:
+                continue
+            packages.append(Package(fields[0], "guix", "", fields[1], "guix"))
+        self.cache.query_put("guix", key, packages)
+        return packages
+
+    def _nixpkgs(self, query, exact):
+        """nixpkgs 同样按需查询：`nix search --json nixpkgs <关键词>`。
+
+        结果的键是属性路径（legacyPackages.<系统>.<包名>），取去掉前缀的那一段当包名，
+        这样搜索结果和 `nix profile install nixpkgs#<包名>` 能对上。
+        """
+        key = ("info:" if exact else "search:") + query
+        cached = self.cache.query_get("nixpkgs", key, self.settings.ttl)
+        if cached is not None:
+            return cached
+        try:
+            output = native_output(["nix", "search", "--json", "nixpkgs", literal_regexp(query)],
+                                   timeout=max(300, int(self.settings.timeout) * 10))
+        except DickError as error:
+            if "experimental" in str(error).lower():
+                raise DickError(
+                    f"{error}；nix search 属于实验性命令，需要在 nix.conf 里开启"
+                    " `experimental-features = nix-command flakes` 后重试") from error
+            raise
+        try:
+            payload = json.loads(output)
+        except ValueError as error:
+            raise DickError(f"nix search 未返回 JSON 结果：{error}") from error
+        if not isinstance(payload, dict):
+            raise DickError("nix search 返回了无效的搜索结果")
+        lowered = query.casefold()
+        packages = []
+        for attribute, record in payload.items():
+            if not isinstance(attribute, str):
+                continue
+            name = strip_nix_attribute(attribute)
+            if not name:
+                continue
+            if exact and not (name.casefold() == lowered
+                              or name.rsplit(".", 1)[-1].casefold() == lowered):
+                continue
+            fields = record if isinstance(record, dict) else {}
+            version = fields.get("version") if isinstance(fields.get("version"), str) else ""
+            description = fields.get("description") if isinstance(fields.get("description"), str) else ""
+            packages.append(Package(name, "nixpkgs", description, version, "nixpkgs"))
+        self.cache.query_put("nixpkgs", key, packages)
+        return packages
+
     def search(self, query, sources, exact=False):
         selected = [repository for repository in self.repositories if repository.source in sources]
         active = {(repository.source, repository.name) for repository in selected}
@@ -271,7 +351,8 @@ class Index:
                        if (package.source, package.repository) in active
                        and package.name.rsplit(".", 1)[-1].casefold() == query.casefold()]
             packages = list(dict.fromkeys([*packages, *aliases]))
-        for source, loader in (("aur", self._aur), ("snap", self._snap), ("linyaps", self._linyaps)):
+        for source, loader in (("aur", self._aur), ("snap", self._snap), ("linyaps", self._linyaps),
+                               ("guix", self._guix), ("nixpkgs", self._nixpkgs)):
             if source not in sources or not any(repository.source == source for repository in selected):
                 continue
             try:

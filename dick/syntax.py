@@ -23,7 +23,8 @@ HELP = """DICK — Detective Index Collection Kit
   upgrade [--source 来源]  整机升级（相当于 pacman -Syu）
   web                      启动本地 Web GUI（应用商店界面，默认 http://127.0.0.1:3907）
 
-来源：pacman / aur / apt / dnf / flatpak / snap / linyaps
+来源：pacman / aur / apt / dnf / apk / flatpak / linyaps
+      guix / nixpkgs / snap
 
 选项：--source 来源    限定来源，可重复
       --json           输出 JSON

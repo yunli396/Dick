@@ -7,8 +7,9 @@
 
 import json
 
-from .discovery import native_output
+from .discovery import native_output, rooted
 from .models import DickError, LocalPackage
+from .parsers import control_records, strip_nix_attribute
 
 
 LIST_COMMANDS = {
@@ -19,6 +20,8 @@ LIST_COMMANDS = {
     "flatpak": ["flatpak", "list", "--app", "--columns=application,version"],
     "snap": ["snap", "list"],
     "linyaps": ["ll-cli", "--json", "list", "--type=app"],
+    "guix": ["guix", "package", "--list-installed"],
+    "nixpkgs": ["nix", "profile", "list", "--json"],
 }
 
 # 没有安装任何包时这些命令会以非零状态退出，属于正常情况。
@@ -97,6 +100,65 @@ def _parse_linyaps(output):
     return packages
 
 
+def _parse_apk_installed(text):
+    """读 Alpine 的 /lib/apk/db/installed，字段格式和 APKINDEX 一样。"""
+    packages = []
+    for record in control_records(text):
+        name = record.get("P", "")
+        if not name:
+            continue
+        packages.append(LocalPackage("apk", name, record.get("V", ""), record.get("T", "")))
+    return packages
+
+
+def _parse_guix(output):
+    """`guix package --list-installed` 输出四列：name version outputs location。"""
+    packages = []
+    for line in output.splitlines():
+        if not line.strip():
+            continue
+        fields = line.split()
+        if len(fields) < 2:
+            raise DickError(f"guix 输出不是预期的四列表格：{line.strip()[:120]}")
+        packages.append(LocalPackage("guix", fields[0], fields[1]))
+    return packages
+
+
+def _parse_nixpkgs(output):
+    """`nix profile list --json` 里每个元素的属性路径去掉前缀就是包名。"""
+    try:
+        payload = json.loads(output)
+    except ValueError as error:
+        raise DickError(f"nix profile list 未返回 JSON 已安装列表：{error}") from error
+    if not isinstance(payload, dict):
+        raise DickError("nix profile list 返回了无效的已安装列表")
+    elements = payload.get("elements")
+    if elements is None:
+        elements = []
+    if isinstance(elements, dict):
+        records = list(elements.values())
+    elif isinstance(elements, list):
+        records = elements
+    else:
+        raise DickError("nix profile list 返回了无效的已安装列表")
+    packages = []
+    for record in records:
+        if isinstance(record, str):
+            name, version, description = strip_nix_attribute(record), "", ""
+        elif isinstance(record, dict):
+            attribute = record.get("attrPath") or record.get("name") or ""
+            if not isinstance(attribute, str) or not attribute:
+                continue
+            name = strip_nix_attribute(attribute)
+            version = record["version"] if isinstance(record.get("version"), str) else ""
+            description = record["description"] if isinstance(record.get("description"), str) else ""
+        else:
+            continue
+        if name:
+            packages.append(LocalPackage("nixpkgs", name, version, description))
+    return packages
+
+
 PARSERS = {
     "pacman": lambda output: _parse_pacman(output, "pacman"),
     "aur": lambda output: _parse_pacman(output, "aur"),
@@ -105,11 +167,28 @@ PARSERS = {
     "flatpak": _parse_flatpak,
     "snap": _parse_snap,
     "linyaps": _parse_linyaps,
+    "guix": _parse_guix,
+    "nixpkgs": _parse_nixpkgs,
+}
+
+# 有些来源的已安装清单就是本地数据库文件：直接读比跑命令更稳，配 --root 也能用。
+FILE_LISTS = {
+    "apk": ("lib/apk/db/installed", _parse_apk_installed),
 }
 
 
 def read_installed(settings, source):
     """返回某个来源里已安装的包；命令失败时抛 DickError。"""
+    if source in FILE_LISTS:
+        relative, parser = FILE_LISTS[source]
+        path = rooted(settings.root, relative)
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace")
+        except FileNotFoundError:
+            return []
+        except OSError as error:
+            raise DickError(f"无法读取 {path}：{error}") from error
+        return parser(text)
     try:
         output = native_output(LIST_COMMANDS[source], timeout=max(60, int(settings.timeout)))
     except DickError:

@@ -7,6 +7,7 @@ from pathlib import Path
 import re
 import shlex
 import subprocess
+from urllib.parse import urlparse
 
 from .models import DickError, Repository
 from .parsers import control_records
@@ -144,6 +145,35 @@ def dnf_repositories(settings):
     return repositories
 
 
+APK_ARCHITECTURES = {"x86_64": "x86_64", "aarch64": "aarch64", "i686": "x86", "armv7l": "armv7"}
+
+
+def apk_repositories(settings):
+    """从 /etc/apk/repositories 里找出仓库：每行是仓库目录，索引在 <目录>/<架构>/APKINDEX.tar.gz。
+
+    `@tag` 前缀（例如 `@testing https://…`）只是给包打标签，索引本身一样，去掉即可。
+    本地目录、光驱这类不是 http(s) 的条目交给 apk 自己读，DICK 走的是 HTTP 客户端。
+    """
+    path = settings.root / "etc/apk/repositories"
+    if not path.exists():
+        return []
+    architecture = APK_ARCHITECTURES.get(settings.architecture, settings.architecture)
+    repositories = {}
+    for raw in read_text(path).splitlines():
+        line = raw.split("#", 1)[0].strip()
+        if line.startswith("@"):
+            parts = line.split(None, 1)
+            line = parts[1].strip() if len(parts) > 1 else ""
+        if not line.startswith(("http://", "https://")):
+            continue
+        base = line.rstrip("/")
+        segments = [segment for segment in urlparse(base).path.split("/") if segment]
+        name = "/".join(segments[-2:]) or base
+        repositories.setdefault(name, Repository(
+            "apk", name, (f"{base}/{architecture}/APKINDEX.tar.gz",), architecture))
+    return list(repositories.values())
+
+
 def english_locale():
     """flatpak 这类命令的输出字段跟着 locale 走（连 JSON 键都会被翻译），解析前统一按 C 语言跑。"""
     env = dict(os.environ)
@@ -195,7 +225,8 @@ def discover(settings, respect_enabled=True, native=True):
         return settings.enabled(source) if respect_enabled else True
 
     repositories, errors = [], []
-    for source, loader in (("pacman", pacman_repositories), ("apt", apt_repositories), ("dnf", dnf_repositories)):
+    for source, loader in (("pacman", pacman_repositories), ("apt", apt_repositories),
+                           ("dnf", dnf_repositories), ("apk", apk_repositories)):
         if not enabled(source):
             continue
         try:
@@ -204,6 +235,10 @@ def discover(settings, respect_enabled=True, native=True):
             errors.append(f"{source}：{error}")
     if enabled("aur") and settings.family == "arch":
         repositories.append(Repository("aur", "aur", ("https://aur.archlinux.org/rpc/v5",)))
+    if enabled("guix") and settings.available("guix"):
+        repositories.append(Repository("guix", "guix", ("https://guix.gnu.org",)))
+    if enabled("nixpkgs") and settings.available("nixpkgs"):
+        repositories.append(Repository("nixpkgs", "nixpkgs", ("https://channels.nixos.org",)))
     if native and enabled("flatpak") and settings.available("flatpak"):
         try:
             for line in native_output(["flatpak", "remotes", "--columns=name,url"]).splitlines():

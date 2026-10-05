@@ -2,18 +2,24 @@
 prefer = "auto"
 
 # 省略 [sources] enabled 时全部来源启用；dick source enable/disable 会就地更新这一行。
+# apk 是 Alpine 的原生索引；guix / nixpkgs 没有可下载的索引，只在用到时现问本机命令。
 [sources]
-enabled = ["pacman", "aur", "apt", "dnf", "flatpak", "linyaps", "snap"]
+enabled = ["pacman", "aur", "apt", "dnf", "apk", "flatpak", "linyaps", "guix", "nixpkgs", "snap"]
 
 # snap 固定垫底：这里怎么写都会被挪到最后一名，漏写也会自动补上（它是兜底来源）。
+# 注意：手动写了 order 的家族，只会按这里列出的顺序降级——新来源（apk/guix/nixpkgs）
+# 要自己加进来，否则不会被尝试。
 [priority.arch]
-order = ["pacman", "aur", "flatpak", "linyaps", "snap"]
+order = ["pacman", "aur", "flatpak", "linyaps", "guix", "nixpkgs", "snap"]
 
 [priority.debian]
-order = ["apt", "flatpak", "linyaps", "snap"]
+order = ["apt", "flatpak", "linyaps", "guix", "nixpkgs", "snap"]
 
 [priority.fedora]
-order = ["dnf", "flatpak", "linyaps", "snap"]
+order = ["dnf", "flatpak", "linyaps", "guix", "nixpkgs", "snap"]
+
+[priority.alpine]
+order = ["apk", "flatpak", "linyaps", "guix", "nixpkgs", "snap"]
 
 [cache]
 ttl = 900

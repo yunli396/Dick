@@ -6,6 +6,18 @@ from .models import DickError, Package
 from .network import decompress
 
 
+def strip_nix_attribute(attribute):
+    """把 Nix 属性路径缩成包名。
+
+    `legacyPackages.x86_64-linux.python3Packages.requests` → `python3Packages.requests`；
+    结果是 `nix profile install nixpkgs#<包名>` 能直接用的形式。
+    """
+    parts = attribute.strip().split(".")
+    if len(parts) > 2 and parts[0] in {"legacyPackages", "packages"}:
+        parts = parts[2:]
+    return ".".join(parts)
+
+
 def control_records(text):
     record = {}
     field = None
@@ -98,3 +110,37 @@ def dnf_packages(content, repository):
             element.clear()
     except ET.ParseError as error:
         raise DickError(f"损坏的 DNF XML：{error}") from error
+
+
+def apk_packages(content, repository):
+    """解析 Alpine 的 APKINDEX.tar.gz。
+
+    压缩包里有一个纯文本 APKINDEX：记录之间用空行分隔，字段是单字母（`P:` 名称、
+    `V:` 版本、`T:` 描述、`A:` 架构、`D:` 依赖……），字段顺序不固定，`P:` 也不在首行。
+    """
+    try:
+        with tarfile.open(fileobj=io.BytesIO(decompress(content)), mode="r:") as archive:
+            for member in archive:
+                if not member.isfile() or member.name.rsplit("/", 1)[-1] != "APKINDEX":
+                    continue
+                if member.size > 64 * 1024 * 1024:
+                    raise DickError("APKINDEX 超过大小限制")
+                handle = archive.extractfile(member)
+                if handle is None:
+                    continue
+                with handle:
+                    text = handle.read().decode("utf-8", errors="replace")
+                found = False
+                for record in control_records(text):
+                    if not record.get("P"):
+                        continue
+                    found = True
+                    yield Package(record["P"], "apk", record.get("T", ""),
+                                  record.get("V", ""), repository.name,
+                                  record.get("A", repository.architecture))
+                if not found:
+                    raise DickError("APKINDEX 中没有 P 字段")
+                return
+            raise DickError("APKINDEX.tar.gz 里没有 APKINDEX 文件")
+    except (tarfile.TarError, OSError) as error:
+        raise DickError(f"损坏的 APKINDEX.tar.gz：{error}") from error

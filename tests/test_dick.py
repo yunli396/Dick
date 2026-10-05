@@ -31,13 +31,13 @@ from dick.ai import Translator
 from dick.cache import Cache
 from dick.cli import choose_candidates, main
 from dick.config import LAST_SOURCE, PRIORITIES, SOURCES, Settings
-from dick.discovery import apt_repositories, discover, dnf_repositories, pacman_repositories
+from dick.discovery import apk_repositories, apt_repositories, discover, dnf_repositories, pacman_repositories
 from dick.index import Index
 from dick.install import Installer
-from dick.local import LIST_COMMANDS, PARSERS, matches, rank, read_installed
+from dick.local import FILE_LISTS, LIST_COMMANDS, PARSERS, matches, rank, read_installed
 from dick.models import DickError, LocalPackage, Package, Repository
 from dick.network import HTTPClient, decompress
-from dick.parsers import apt_packages, dnf_packages, pacman_packages
+from dick.parsers import apk_packages, apt_packages, dnf_packages, pacman_packages, strip_nix_attribute
 from dick.progress import Progress
 from dick.security import (certificate_names, ensure_certificate, interface_addresses, resolve_token,
                            ssl_context, token_path)
@@ -63,13 +63,41 @@ PRIMARY = b'''<metadata xmlns="http://linux.duke.edu/metadata/common" packages="
 </metadata>'''
 
 
+def apk_index(*records):
+    """造一个 APKINDEX.tar.gz；records 是 (name, version, description[, arch])。
+
+    真实索引里 `P:`（包名）不是第一条字段，首条是校验和，这里照抄同样的形状。
+    """
+    entries = []
+    for name, version, description, *rest in records:
+        architecture = rest[0] if rest else "x86_64"
+        entries.append(f"C:Q1MQxXAVMr80Ty95MYYNhPNBn/WDs=\nP:{name}\nV:{version}\n"
+                       f"A:{architecture}\nS:866999\nI:1720320\nT:{description}\n"
+                       f"U:https://example.com/\nL:MIT\n")
+    payload = "\n".join(entries).encode()
+    output = io.BytesIO()
+    with tarfile.open(fileobj=output, mode="w:gz") as archive:
+        member = tarfile.TarInfo("APKINDEX")
+        member.size = len(payload)
+        archive.addfile(member, io.BytesIO(payload))
+        description = b"Alpine package index\n"
+        meta = tarfile.TarInfo("DESCRIPTION")
+        meta.size = len(description)
+        archive.addfile(meta, io.BytesIO(description))
+    return output.getvalue()
+
+
 class FixtureTest(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)
         self.root = Path(self.temporary.name)
         self.write("etc/os-release", 'ID=arch\nVERSION_ID="2026.10"\n')
-        self.settings = Settings(root=self.root, cache_dir=self.root / "cache")
+        # 用夹具里的空配置：否则会读到开发者本机的 ~/.config/dick/config.toml，
+        # enabled/priority 随本机配置变化，测试就不可复现了。
+        self.config = self.write("etc/dick.toml", "")
+        self.settings = Settings(config_path=self.config, root=self.root,
+                                 cache_dir=self.root / "cache", create=True)
         self.settings.architecture = "x86_64"
         self.cache = Cache(self.settings.cache_dir)
         self.addCleanup(self.cache.close)
@@ -182,6 +210,32 @@ class DiscoveryTests(FixtureTest):
             Settings(config, self.root, self.root / "other-cache")
 
 
+    def test_apk_repositories_strip_tags_and_map_architectures(self):
+        """/etc/apk/repositories 每行是一个仓库目录，@tag 前缀只影响包标签，索引照读。"""
+        self.write("etc/apk/repositories",
+                   "# 注释行\n"
+                   "https://dl-cdn.alpinelinux.org/alpine/v3.20/main\n"
+                   "@testing https://dl-cdn.alpinelinux.org/alpine/edge/testing\n"
+                   "/media/cdrom/apks\n")
+        repositories = apk_repositories(self.settings)
+        self.assertEqual([repository.name for repository in repositories], ["v3.20/main", "edge/testing"])
+        self.assertEqual(repositories[0].urls,
+                         ("https://dl-cdn.alpinelinux.org/alpine/v3.20/main/x86_64/APKINDEX.tar.gz",))
+        self.assertEqual(repositories[0].source, "apk")
+        self.settings.architecture = "armv7l"
+        self.assertIn("/armv7/APKINDEX.tar.gz", apk_repositories(self.settings)[0].urls[0])
+
+    def test_apk_without_configuration_and_guix_nixpkgs_pseudo_repositories(self):
+        self.assertEqual(apk_repositories(self.settings), [])
+        with patch.object(self.settings, "available", side_effect=lambda source: source in {"guix", "nixpkgs"}):
+            repositories, errors = discover(self.settings)
+        self.assertFalse(errors)
+        on_demand = {repository.source: repository.urls for repository in repositories
+                     if repository.source in {"guix", "nixpkgs"}}
+        self.assertEqual(on_demand, {"guix": ("https://guix.gnu.org",),
+                                     "nixpkgs": ("https://channels.nixos.org",)})
+
+
 class ParserTests(unittest.TestCase):
     def test_pacman_tar_without_extraction(self):
         package = list(pacman_packages(pacman_database(), Repository("pacman", "extra", ())))[0]
@@ -207,6 +261,42 @@ class ParserTests(unittest.TestCase):
             list(dnf_packages(b"<html/>", Repository("dnf", "main", ())))
         with self.assertRaises(DickError):
             list(pacman_packages(b"invalid tar", Repository("pacman", "extra", ())))
+
+    def test_apk_index_members_fields_and_architectures(self):
+        content = apk_index(("firefox", "128.0-r1", "Web browser"),
+                            ("py3-requests", "2.33.1-r0", "HTTP request library", "aarch64"))
+        packages = list(apk_packages(content, Repository("apk", "v3.20/main", ())))
+        self.assertEqual([(package.name, package.version, package.description, package.architecture)
+                          for package in packages],
+                         [("firefox", "128.0-r1", "Web browser", "x86_64"),
+                          ("py3-requests", "2.33.1-r0", "HTTP request library", "aarch64")])
+        self.assertEqual((packages[0].source, packages[0].repository), ("apk", "v3.20/main"))
+
+    def test_apk_index_errors_are_described(self):
+        with self.assertRaisesRegex(DickError, "损坏的 APKINDEX.tar.gz"):
+            list(apk_packages(b"invalid tar", Repository("apk", "main", ())))
+        output = io.BytesIO()
+        with tarfile.open(fileobj=output, mode="w:gz") as archive:
+            payload = b"just a description\n"
+            member = tarfile.TarInfo("DESCRIPTION")
+            member.size = len(payload)
+            archive.addfile(member, io.BytesIO(payload))
+        with self.assertRaisesRegex(DickError, "没有 APKINDEX"):
+            list(apk_packages(output.getvalue(), Repository("apk", "main", ())))
+        raw = io.BytesIO()
+        with tarfile.open(fileobj=raw, mode="w") as archive:  # 不压缩，方便这里省掉 P: 字段
+            payload = b"C:Q1MQxXAVMr80Ty95MYYNhPNBn/WDs=\nV:1.0-r0\nT:No name here\n"
+            member = tarfile.TarInfo("APKINDEX")
+            member.size = len(payload)
+            archive.addfile(member, io.BytesIO(payload))
+        with self.assertRaisesRegex(DickError, "P 字段"):
+            list(apk_packages(raw.getvalue(), Repository("apk", "main", ())))
+
+    def test_nix_attribute_paths_become_installable_names(self):
+        self.assertEqual(strip_nix_attribute("legacyPackages.x86_64-linux.python3Packages.requests"),
+                         "python3Packages.requests")
+        self.assertEqual(strip_nix_attribute("packages.aarch64-darwin.firefox"), "firefox")
+        self.assertEqual(strip_nix_attribute("firefox"), "firefox")
 
     def test_expansion_and_zstd_limits(self):
         if zstd is None:
@@ -455,6 +545,63 @@ class IndexTests(FixtureTest):
         self.assertIsNone(self.cache.snapshot(Repository("linyaps", "stable", ())))
 
 
+    def test_guix_search_parses_table_and_filters_exact_names(self):
+        """guix -A 的输出是四列表格（name version outputs location），没有描述列。"""
+        table = ("firefox  128.0  out  gnu/packages/gnuzilla.scm:123:2\n"
+                 "firefox-esr  115.14.0  out  gnu/packages/gnuzilla.scm:456:2\n")
+        index = self.index([Repository("guix", "guix", ())])
+        with patch("dick.index.native_output", return_value=table) as output:
+            packages, errors = index.search("firefox", ["guix"])
+            index.search("firefox", ["guix"])  # 第二次走查询缓存
+            exact, _ = index.search("firefox", ["guix"], exact=True)
+        self.assertFalse(errors)
+        self.assertEqual([package.name for package in packages], ["firefox", "firefox-esr"])
+        self.assertEqual([package.name for package in exact], ["firefox"])
+        self.assertEqual((packages[0].source, packages[0].version, packages[0].description),
+                         ("guix", "128.0", ""))
+        self.assertEqual(output.call_count, 2)
+        output.assert_any_call(["guix", "package", "-A", "firefox"], timeout=180)
+
+    def test_guix_and_nixpkgs_output_problems_are_reported(self):
+        index = self.index([Repository("guix", "guix", ()), Repository("nixpkgs", "nixpkgs", ())])
+        with patch("dick.index.native_output", return_value="firefox\n"):
+            packages, errors = index.search("firefox", ["guix"])
+        self.assertFalse(packages)
+        self.assertIn("四列表格", "；".join(errors))
+        with patch("dick.index.native_output", side_effect=DickError(
+                "命令失败 nix search：experimental Nix feature 'nix-command' is disabled")):
+            packages, errors = index.search("firefox", ["nixpkgs"])
+        self.assertFalse(packages)
+        self.assertIn("experimental-features", "；".join(errors))
+        with patch("dick.index.native_output", return_value="not json"):
+            packages, errors = index.search("firefox", ["nixpkgs"])
+        self.assertFalse(packages)
+        self.assertIn("JSON", "；".join(errors))
+
+    def test_nixpkgs_search_reads_json_and_strips_attribute_prefixes(self):
+        payload = json.dumps({
+            "legacyPackages.x86_64-linux.firefox": {"pname": "firefox", "version": "128.0",
+                                                    "description": "Web browser"},
+            "legacyPackages.x86_64-linux.python3Packages.requests": {"version": "2.32.3"},
+        })
+        index = self.index([Repository("nixpkgs", "nixpkgs", ())])
+        with patch("dick.index.native_output", return_value=payload) as output:
+            packages, errors = index.search("firefox", ["nixpkgs"])
+        self.assertFalse(errors)
+        self.assertEqual([(package.name, package.version, package.description) for package in packages],
+                         [("firefox", "128.0", "Web browser"), ("python3Packages.requests", "2.32.3", "")])
+        self.assertTrue(all(package.source == "nixpkgs" for package in packages))
+        output.assert_called_once_with(["nix", "search", "--json", "nixpkgs", "firefox"], timeout=300)
+
+    def test_guix_and_nixpkgs_expressions_are_escaped(self):
+        """`+`/`(` 这类元字符在 guix 的 POSIX 正则和 nix 的 std::regex 里都是语法，必须当字面量。"""
+        index = self.index([Repository("guix", "guix", ()), Repository("nixpkgs", "nixpkgs", ())])
+        with patch("dick.index.native_output", return_value="") as output:
+            index.search("g++", ["guix"])
+            index.search("g++", ["nixpkgs"])
+        self.assertEqual([call.args[0][-1] for call in output.call_args_list], ["g\\+\\+", "g\\+\\+"])
+
+
 class ConfigTests(FixtureTest):
     def test_sources_default_to_all_enabled(self):
         self.assertEqual(self.settings.enabled_sources, SOURCES)
@@ -500,6 +647,22 @@ class ConfigTests(FixtureTest):
         duplicate = self.write("snap-twice.toml", '[priority.arch]\norder = ["pacman", "snap", "snap"]\n')
         with self.assertRaisesRegex(DickError, "不能包含重复来源"):
             Settings(duplicate, self.root, self.root / "c4")
+
+    def test_alpine_family_prefers_apk_and_knows_the_new_sources(self):
+        self.write("etc/os-release", "ID=alpine\n")
+        settings = Settings(self.config, self.root, self.root / "alpine-cache", create=True)
+        self.assertEqual(settings.family, "alpine")
+        self.assertEqual(settings.priority[0], "apk")
+        self.assertEqual(settings.priority[-1], LAST_SOURCE)
+        self.assertLess(settings.priority.index("guix"), settings.priority.index(LAST_SOURCE))
+        with patch("dick.config.shutil.which",
+                   side_effect=lambda command: "/usr/sbin/apk" if command == "apk" else None):
+            self.assertTrue(settings.available("apk"))
+            self.assertFalse(settings.available("guix"))
+            self.assertFalse(settings.available("nixpkgs"))
+        with patch("dick.config.shutil.which",
+                   side_effect=lambda command: "/usr/bin/nix" if command == "nix" else None):
+            self.assertTrue(settings.available("nixpkgs"))
 
     def test_every_family_default_priority_ends_with_snap(self):
         for family, order in PRIORITIES.items():
@@ -568,6 +731,39 @@ class LocalTests(unittest.TestCase):
             with self.assertRaises(DickError):
                 read_installed(settings, "pacman")
         output.assert_any_call(["pacman", "-Qm"], timeout=60)
+
+    def test_apk_installed_database_is_read_from_the_root(self):
+        """apk 的已安装清单是 /lib/apk/db/installed 文件，字段和 APKINDEX 一样，读文件也天然支持 --root。"""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            path = root / "lib/apk/db/installed"
+            path.parent.mkdir(parents=True)
+            path.write_text("C:Q1MQxXAVMr80Ty95MYYNhPNBn/WDs=\nP:firefox\nV:128.0-r1\nA:x86_64\n"
+                            "T:Web browser\n\nP:musl\nV:1.2.5-r0\nT:C library\n", encoding="utf-8")
+            self.assertEqual(FILE_LISTS["apk"][0], "lib/apk/db/installed")
+            self.assertEqual([(package.name, package.version, package.description)
+                              for package in read_installed(Mock(timeout=20, root=root), "apk")],
+                             [("firefox", "128.0-r1", "Web browser"), ("musl", "1.2.5-r0", "C library")])
+            self.assertEqual(read_installed(Mock(timeout=20, root=root / "absent"), "apk"), [])
+
+    def test_guix_and_nixpkgs_installed_lists(self):
+        self.assertEqual(LIST_COMMANDS["guix"], ["guix", "package", "--list-installed"])
+        self.assertEqual(LIST_COMMANDS["nixpkgs"], ["nix", "profile", "list", "--json"])
+        self.assertEqual([(package.name, package.version) for package in PARSERS["guix"](
+            "firefox  128.0  out  gnu/packages/gnuzilla.scm:123:2\n")], [("firefox", "128.0")])
+        with self.assertRaisesRegex(DickError, "四列表格"):
+            PARSERS["guix"]("firefox\n")
+        payload = json.dumps({"elements": {
+            "0": {"attrPath": "legacyPackages.x86_64-linux.firefox", "version": "128.0",
+                  "description": "Web browser"},
+            "firefox-esr": "legacyPackages.x86_64-linux.firefox-esr",
+        }})
+        self.assertEqual([(package.name, package.version) for package in PARSERS["nixpkgs"](payload)],
+                         [("firefox", "128.0"), ("firefox-esr", "")])
+        self.assertEqual(PARSERS["nixpkgs"](json.dumps({"elements": {}})), [])
+        for broken in ("not json", json.dumps([1])):
+            with self.subTest(broken=broken), self.assertRaises(DickError):
+                PARSERS["nixpkgs"](broken)
 
     def test_matching_prefers_exact_names_and_id_segments(self):
         exact = LocalPackage("pacman", "firefox")
@@ -760,6 +956,38 @@ class InstallationTests(FixtureTest):
         self.assertIn("sudo ll-cli install -y com.qq.music", joined)
         self.assertIn("49-dick-linglong.rules", joined)
 
+    def test_apk_guix_and_nixpkgs_install_and_remove_commands(self):
+        """apk 装到系统里；guix / nixpkgs 装进用户自己的 profile（所以这三个来源不加 sudo）。"""
+        installer = self.installer(Mock(), dry_run=True)
+        self.assertEqual(installer.install_command(Package("firefox", "apk", repository="v3.20/main")),
+                         ["apk", "add", "--no-cache", "firefox"])
+        self.assertEqual(installer.install_command(Package("firefox", "guix")),
+                         ["guix", "install", "firefox"])
+        self.assertEqual(installer.install_command(Package("python3Packages.requests", "nixpkgs")),
+                         ["nix", "profile", "install", "nixpkgs#python3Packages.requests"])
+        self.assertEqual(installer.uninstall_command(Package("firefox", "apk")),
+                         ["apk", "del", "firefox"])
+        self.assertEqual(installer.uninstall_command(Package("firefox", "guix")),
+                         ["guix", "remove", "firefox"])
+        self.assertEqual(installer.uninstall_command(Package("firefox", "nixpkgs")),
+                         ["nix", "profile", "remove", "firefox"])
+
+    def test_apk_is_privileged_and_alpine_upgrades_through_it(self):
+        self.settings.family = "alpine"
+        self.settings.root = Path("/")
+        installer = Installer(self.settings, Mock(), self.messages.append, yes=True)
+        installer.privileged = lambda command: ["sudo", *command]
+        self.assertEqual(installer.install_command(Package("firefox", "apk")),
+                         ["sudo", "apk", "add", "--no-cache", "firefox"])
+        self.assertEqual(installer.uninstall_command(Package("firefox", "apk")),
+                         ["sudo", "apk", "del", "firefox"])
+        with patch.object(self.settings, "available", return_value=True):
+            self.assertEqual(installer.native_source(["pacman", "apk"]), "apk")
+            self.assertEqual(installer.upgrade_command(["apk"]), ["sudo", "apk", "-U", "upgrade"])
+            self.assertEqual(installer.refresh_command("apk"), ["sudo", "apk", "update"])
+            with self.assertRaisesRegex(DickError, "pacman/apt/dnf/apk"):
+                installer.native_source(["guix", "nixpkgs"])
+
     def test_stream_captures_output_and_returncode(self):
         """Web 任务：子进程的 stdout/stderr 与回车刷新的进度都要进任务日志，退出码原样返回。"""
         self.settings.root = Path("/")
@@ -903,7 +1131,8 @@ class CLITests(FixtureTest):
         code, output, _ = self.run_cli(self.common("--config", str(config), "--json", "source", "disable", "flatpak"))
         self.assertEqual(code, 0)
         self.assertNotIn("flatpak", json.loads(output)["enabled"])
-        self.assertIn('enabled = ["pacman", "aur", "apt", "dnf", "linyaps", "snap"]',
+        remaining = [source for source in SOURCES if source != "flatpak"]
+        self.assertIn("enabled = [" + ", ".join(f'"{source}"' for source in remaining) + "]",
                       config.read_text(encoding="utf-8"))
         with patch("dick.discovery.native_output") as native:
             code, output, _ = self.run_cli(self.common("--config", str(config), "--json", "source", "list"))
@@ -1164,7 +1393,8 @@ class WebAppTests(FixtureTest):
     def test_enable_and_disable_sources_write_config(self):
         app = self.app()
         payload = app.disable_sources({}, {"sources": ["flatpak", "snap"]})
-        self.assertEqual(payload["enabled"], ["pacman", "aur", "apt", "dnf", "linyaps"])
+        self.assertEqual(payload["enabled"],
+                         [source for source in SOURCES if source not in {"flatpak", "snap"}])
         again = Settings(config_path=app.settings.config_path, root=self.root, cache_dir=self.root / "cache")
         self.assertFalse(again.enabled("flatpak"))
         self.assertIn("flatpak", app.enable_sources({}, {"sources": ["flatpak"]})["enabled"])
