@@ -11,6 +11,7 @@ import socket
 import ssl
 import stat
 import subprocess
+import sys
 import tarfile
 import tempfile
 import threading
@@ -26,7 +27,7 @@ try:
 except ImportError:
     zstd = None
 
-from dick import catalog
+from dick import catalog, selfmanage
 from dick.ai import Translator
 from dick.cache import Cache
 from dick.cli import choose_candidates, main
@@ -830,6 +831,8 @@ class SyntaxTests(unittest.TestCase):
             ("search", "web", "browser"): "search",
             ("update",): "update",
             ("upgrade",): "upgrade",
+            ("updateme",): "updateme",
+            ("removeme",): "removeme",
         }
         for arguments, name in cases.items():
             with self.subTest(arguments=arguments):
@@ -845,6 +848,7 @@ class SyntaxTests(unittest.TestCase):
         removed = ["-S", "-Ss", "-Si", "-R", "-Rns", "-Sy", "-Syu", "-Qs", "sources", "refresh",
                    "info", "remove-deep", "full-upgrade", "search-local", "frobnicate"]
         for arguments in (["install"], ["remove"], ["search"], ["update", "firefox"], ["upgrade", "firefox"],
+                          ["updateme", "firefox"], ["removeme", "firefox"],
                           ["source"], ["source", "enable"], ["source", "disable"], ["source", "reset"],
                           ["source", "list", "extra"],
                           *([command, "firefox"] for command in removed)):
@@ -865,6 +869,12 @@ class SyntaxTests(unittest.TestCase):
         self.assertEqual(normalize(remaining).targets, ("firefox",))
         with self.assertRaises(DickError):
             normalize([*remaining, "--unsafe"])
+
+    def test_self_management_options(self):
+        args, remaining = options(["--prefix", "/tmp/x", "--ref", "v0.2", "--purge", "removeme", "--yes"])
+        self.assertEqual((args.prefix, args.ref), ("/tmp/x", "v0.2"))
+        self.assertTrue(args.purge and args.yes)
+        self.assertEqual(normalize(remaining), Action("removeme"))
 
     def test_jobs_and_limit_options(self):
         args, remaining = options(["--jobs", "3", "--limit", "7", "update"])
@@ -1310,6 +1320,175 @@ class CLITests(FixtureTest):
             self.assertEqual(main(["--root", str(self.root), "install", "firefox"]), 1)
         self.assertIn("--root", output.getvalue())
         run.assert_not_called()
+
+
+class SelfManageTests(FixtureTest):
+    """dick updateme / dick removeme：只碰 install.sh 装出来的目录结构。"""
+
+    def run_cli(self, arguments):
+        with contextlib.redirect_stdout(io.StringIO()) as output, \
+                contextlib.redirect_stderr(io.StringIO()) as errors:
+            code = main(arguments)
+        return code, output.getvalue(), errors.getvalue()
+
+    def script_installation(self, prefix=None):
+        """造一个 install.sh 的目录结构：share/dick/{venv,src} + bin/dick 软链。"""
+        prefix = Path(prefix or self.root / "prefix")
+        for part in ("share/dick/venv/bin", "share/dick/src/.git", "bin"):
+            (prefix / part).mkdir(parents=True, exist_ok=True)
+        (prefix / "share/dick/src/pyproject.toml").write_text("[project]\nname = \"dick\"\n")
+        for name in ("pip", "python", "dick"):
+            (prefix / "share/dick/venv/bin" / name).write_text("#!/bin/sh\n")
+        (prefix / "bin/dick").symlink_to(prefix / "share/dick/venv/bin/dick")
+        return prefix
+
+    def args_for(self, *extra):
+        args, remaining = options([*extra])
+        self.assertEqual(normalize(remaining).name, "updateme" if "updateme" in remaining else "removeme")
+        return args
+
+    def test_script_layout_is_detected_and_update_plan_is_complete(self):
+        prefix = self.script_installation()
+        installation = selfmanage.detect(str(prefix))
+        self.assertEqual(installation.kind, "script")
+        self.assertEqual(installation.share, prefix / "share/dick")
+        commands = selfmanage.update_commands(installation, "main")
+        self.assertEqual([Path(command[0]).name for command in commands], ["git", "git", "pip"])
+        self.assertEqual(commands[0][-2:], ["origin", "main"])
+        self.assertEqual(commands[2][-2:], ["--upgrade", str(prefix / "share/dick/src")])
+        # --ref 决定拉哪个分支
+        self.assertEqual(selfmanage.update_commands(installation, "v0.2")[0][-1], "v0.2")
+
+    def test_detect_uses_the_configured_prefix_then_reports_unknown(self):
+        prefix = self.script_installation()
+        with patch.dict(os.environ, {"DICK_PREFIX": str(prefix)}):
+            self.assertEqual(selfmanage.detect().kind, "script")
+        with self.assertRaisesRegex(DickError, "没找到 share/dick"):
+            selfmanage.detect(str(self.root / "nothing-here"))
+
+    def test_updateme_reports_the_version_change_and_dry_run(self):
+        prefix = self.script_installation()
+
+        versions = iter(["0.1.0\n", "0.2.0\n"])
+
+        def newer(command, cwd=None):
+            if Path(command[0]).name == "python":
+                return 0, next(versions)
+            return 0, "Already up to date."
+
+        args = self.args_for("--prefix", str(prefix), "updateme")
+        with patch.object(selfmanage, "run_command", side_effect=newer):
+            payload = selfmanage.run_update(self.settings, args)
+        self.assertTrue(payload["success"])
+        self.assertEqual((payload["before"], payload["after"]), ("0.1.0", "0.2.0"))
+        self.assertIn("0.1.0 → 0.2.0", payload["message"])
+        self.assertIn("Already up to date.", payload["lines"])
+
+        # 演练：一条命令都不执行，版本也不去读
+        dry = self.args_for("--prefix", str(prefix), "updateme", "--dry-run")
+        with patch.object(selfmanage, "run_command", side_effect=AssertionError("演练不应执行命令")):
+            payload = selfmanage.run_update(self.settings, dry)
+        self.assertTrue(payload["dry_run"] and payload["success"])
+        self.assertEqual(payload["lines"], [])
+        self.assertEqual(payload["after"], payload["before"])
+        self.assertIn("演练", payload["message"])
+
+    def test_updateme_keeps_the_reason_when_a_command_fails(self):
+        prefix = self.script_installation()
+
+        def broken(command, cwd=None):
+            if Path(command[0]).name == "python":
+                return 0, "0.1.0\n"
+            return 128, "致命错误：不是 Git 仓库"
+
+        args = self.args_for("--prefix", str(prefix), "updateme")
+        with patch.object(selfmanage, "run_command", side_effect=broken):
+            payload = selfmanage.run_update(self.settings, args)
+        self.assertFalse(payload["success"])
+        self.assertEqual(payload["returncode"], 128)
+        self.assertIn("退出码 128", payload["error"])
+        self.assertIn("不是 Git 仓库", payload["lines"][0])
+        self.assertIn("更新失败", payload["message"])
+
+    def test_updateme_refuses_system_and_unknown_installations(self):
+        for kind, hint, pattern in (("system", "请用装它的包管理器", "包管理器"),
+                                    ("unknown", "没找到 DICK 的安装位置", "没找到")):
+            with self.subTest(kind=kind), \
+                    patch.object(selfmanage, "detect", return_value=selfmanage.Installation(kind, hint=hint)), \
+                    self.assertRaisesRegex(DickError, pattern):
+                selfmanage.run_update(self.settings, self.args_for("updateme"))
+
+    def test_update_commands_pull_the_checkout_and_tolerate_a_tarball_install(self):
+        checkout = selfmanage.Installation("checkout", source=self.root)
+        self.assertEqual(selfmanage.update_commands(checkout, "main"),
+                         [["git", "-C", str(self.root), "pull", "--ff-only"]])
+        # 没有 src（当初用 tarball 装的）：让 pip 直接取仓库
+        prefix = self.script_installation()
+        installation = selfmanage.detect(str(prefix))
+        installation.source = None
+        self.assertEqual(selfmanage.update_commands(installation, "main")[0][-1],
+                         f"git+{selfmanage.REPO_URL}@main")
+
+    def test_removeme_deletes_the_installation_but_keeps_the_config(self):
+        prefix = self.script_installation()
+        config = self.write("self/etc/dick.toml", "")
+        code, output, errors = self.run_cli(["--prefix", str(prefix), "--config", str(config),
+                                             "--cache-dir", str(self.root / "self-cache"),
+                                             "removeme", "--yes"])
+        self.assertEqual(code, 0)
+        self.assertFalse((prefix / "share/dick").exists())
+        self.assertFalse((prefix / "bin/dick").is_symlink())
+        self.assertTrue(config.exists())
+        self.assertIn("保留配置", errors)
+
+    def test_removeme_purge_also_removes_config_and_cache(self):
+        prefix = self.script_installation()
+        config = self.write("purge/etc/dick.toml", "")
+        cache = self.write("purge/cache/keep.txt", "")
+        code, output, _ = self.run_cli(["--prefix", str(prefix), "--config", str(config),
+                                        "--cache-dir", str(cache.parent),
+                                        "--json", "removeme", "--yes", "--purge"])
+        self.assertEqual(code, 0)
+        payload = json.loads(output)
+        self.assertEqual(payload["kind"], "script")
+        self.assertIn(str(config.parent), payload["removed"])
+        self.assertFalse(config.parent.exists())
+        self.assertFalse(cache.parent.exists())
+
+    def test_removeme_dry_run_lists_targets_without_deleting(self):
+        prefix = self.script_installation()
+        code, output, errors = self.run_cli(["--prefix", str(prefix), "--cache-dir",
+                                             str(self.root / "dry-cache"), "--json",
+                                             "removeme", "--dry-run"])
+        self.assertEqual(code, 0)
+        payload = json.loads(output)
+        self.assertEqual(payload["removed"], [str(prefix / "share/dick"), str(prefix / "bin/dick")])
+        self.assertTrue((prefix / "share/dick").is_dir())
+        self.assertIn("演练", payload["message"])
+        self.assertEqual(errors, "")
+
+    def test_removeme_refuses_a_source_checkout_and_missing_confirmation(self):
+        with patch.object(selfmanage, "detect",
+                          return_value=selfmanage.Installation("checkout", source=self.root)), \
+                self.assertRaisesRegex(DickError, "源码工作区"):
+            selfmanage.run_remove(self.settings, self.args_for("removeme", "--yes"))
+        prefix = self.script_installation()
+        args = self.args_for("--prefix", str(prefix), "removeme")
+        with patch.object(sys, "stdin", io.StringIO("")), \
+                self.assertRaisesRegex(DickError, "需要 --yes"):
+            selfmanage.run_remove(self.settings, args)
+        self.assertTrue((prefix / "share/dick").is_dir())
+
+    def test_removeme_writes_nothing_outside_its_prefix(self):
+        """回归：removeme 只删安装目录与那个软链，绝不越界删别的路径。"""
+        prefix = self.script_installation()
+        outsider = self.write("bystander/important.txt", "keep me")
+        code, _, _ = self.run_cli(["--prefix", str(prefix), "--config", str(self.config),
+                                   "--cache-dir", str(self.root / "outside-cache"),
+                                   "--json", "removeme", "--yes"])
+        self.assertEqual(code, 0)
+        self.assertTrue(outsider.exists())
+        self.assertTrue(self.config.exists())
 
 
 class AITests(FixtureTest):

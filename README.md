@@ -12,8 +12,19 @@
 curl -fsSL https://raw.githubusercontent.com/yunli396/Dick/main/install.sh | bash
 ```
 
-脚本同时可用于更新。
-卸载：
+脚本同时可用于更新。装好之后，更新和卸载也可以直接交给 DICK 自己：
+
+```bash
+dick updateme             # 更新 DICK 自己（git pull + 重装进 venv）
+dick updateme --dry-run   # 只看会执行哪些命令
+dick updateme --ref dev   # 换到别的分支或标签
+dick removeme             # 卸载 DICK（默认保留 ~/.config/dick 里的配置）
+dick removeme --purge     # 连配置与缓存一起删
+```
+
+`updateme` / `removeme` 只认 install.sh 装出来的目录结构（`<前缀>/share/dick/{venv,src}` 与 `<前缀>/bin/dick` 软链，默认前缀 `~/.local`，可用 `--prefix` 指定）。从源码工作区直接跑时，`updateme` 就是 `git pull --ff-only`，`removeme` 会拒绝执行并说明原因——它不会去删你的工作区；装在系统 Python 里的 DICK 会告诉你该用哪个包管理器。卸载需要交互确认，脚本里请显式加 `--yes`。
+
+也可以用安装脚本本身卸载：
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/yunli396/Dick/main/install.sh | bash -s -- --uninstall
@@ -71,9 +82,11 @@ dick web
 | `dick search <关键词> [--source X] [--exact]` | 搜索索引与缓存 |
 | `dick update [--source X]` | 刷新索引与缓存 |
 | `dick upgrade [--source X]` | 升级 |
+| `dick updateme [--ref 分支] [--prefix 路径]` | 更新 DICK 自己（install.sh 装法：git + pip；源码工作区：`git pull --ff-only`） |
+| `dick removeme [--purge] [--prefix 路径]` | 卸载 DICK 自己；默认保留配置，`--purge` 连配置与缓存一起删 |
 | `dick web [--host H] [--port P] [--open] [--tls\|--no-tls] [--token T\|--no-token]` | 启动本地 Web GUI，默认 `http://127.0.0.1:3907` |
 
-全局选项：`--source`（可重复）、`--json`、`--dry-run`、`-y` / `--yes` / `--noconfirm`、`--exact`（搜索只做精确匹配，同时匹配 ID 别名）、`--deep`（仅 `remove`，连带清理依赖与配置）、`--limit`（每个来源显示上限，默认 50）、`--jobs`、`--config`、`--cache-dir`、`--root`、`--host` / `--port` / `--open` / `--tls` / `--token` / `--no-token`（仅 `web`）、`--version`、`-h`。
+全局选项：`--source`（可重复）、`--json`、`--dry-run`、`-y` / `--yes` / `--noconfirm`、`--exact`（搜索只做精确匹配，同时匹配 ID 别名）、`--deep`（仅 `remove`，连带清理依赖与配置）、`--limit`（每个来源显示上限，默认 50）、`--jobs`、`--config`、`--cache-dir`、`--root`、`--prefix` / `--ref` / `--purge`（仅 `updateme` / `removeme`）、`--host` / `--port` / `--open` / `--tls` / `--token` / `--no-token`（仅 `web`）、`--version`、`-h`。
 
 ## 来源支持
 
