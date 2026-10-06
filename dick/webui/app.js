@@ -542,6 +542,56 @@ async function loadStatus() {
   $('#aiState').textContent = ai.configured
     ? `已配置：${ai.model} · ${ai.base_url} · 目标语言 ${ai.target}`
     : '尚未配置（填写接口地址、模型与 API Key 后即可翻译包描述）。';
+
+  state.boot = status.boot;
+  const self = status.self || {};
+  $('#selfState').textContent = `DICK ${status.version} · 进程 ${status.pid} · ${self.location || '未知位置'}`;
+  $('#selfHint').textContent = self.can_update
+    ? '「更新 DICK」会用 git 拉取 main 并重装；更新完点「重启服务」让新版本生效（重启期间页面会短暂断开，之后自动恢复）。'
+    : (self.hint || '这份 DICK 不支持自更新，请用装它的方式更新。');
+  $('#selfUpdate').disabled = !self.can_update;
+}
+
+async function updateSelf() {
+  if (!window.confirm('更新 DICK？会拉取 main 并重新安装，完成后需要重启服务生效。')) return;
+  startJob({ action: 'updateme', confirm: true, dry_run: false, sources: [] }, { title: '更新 DICK' });
+}
+
+async function restartServer() {
+  if (!window.confirm('重启 DICK 服务？正在跑的任务会中断，页面几秒后自动恢复。')) return;
+  const previous = state.boot;
+  let answer;
+  try {
+    answer = await api('/api/self/restart', { method: 'POST', body: { confirm: true } });
+  } catch (error) {
+    toast(`重启请求失败：${error.message}`, 'err');
+    return;
+  }
+  toast(answer.message || '正在重启服务…');
+  $('#jobdock').hidden = false;   // 重启期间让右下角的胶囊显示进度
+  $('#jobTitle').textContent = '重启服务';
+  setJobTab('running', '重启服务');
+  await waitForRestart(previous);
+}
+
+async function waitForRestart(previous, tries = 40) {
+  // 重启期间连接会被拒（或拿到旧进程的最后一个响应），等到启动编号变了才算真的换了进程。
+  for (let attempt = 0; attempt < tries; attempt += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    try {
+      const status = await api('/api/status');
+      if (status.boot && status.boot !== previous) {
+        state.boot = status.boot;
+        setJobTab('ok', '重启服务');
+        toast('服务已重启');
+        await loadStatus();
+        return true;
+      }
+    } catch (error) { /* 连接被拒是重启的正常现象，继续等 */ }
+  }
+  setJobTab('failed', '重启服务');
+  toast('没等到新进程，请到宿主终端看一下服务状态', 'err');
+  return false;
 }
 
 async function saveAi() {
@@ -1095,6 +1145,11 @@ async function pollJob() {
     actions.append(el('button', { class: 'btn', text: '取消', onclick: closeJob }));
   } else {
     actions.append(el('button', { class: 'btn', text: '关闭', onclick: closeJob }));
+    if (!failed && job.request.action === 'updateme') {
+      actions.append(el('button', {
+        class: 'btn btn-primary', text: '重启服务生效', onclick: restartServer,
+      }));
+    }
     if (!failed && mutating) {
       actions.append(el('button', {
         class: 'btn', text: '刷新列表',
@@ -1146,6 +1201,12 @@ function summarize(snapshot, request) {
   }
   if (request.action === 'update') {
     return `刷新了 ${result.refreshed.length} 个仓库${result.errors.length ? `，${result.errors.length} 个失败` : ''}。`;
+  }
+  if (request.action === 'updateme') {
+    const lines = [result.message];
+    if (result.before !== result.after && result.after) lines.push(`版本：${result.before} → ${result.after}`);
+    if (result.restart_required) lines.push('点「重启服务」让新版本生效。');
+    return lines.filter(Boolean).join('\n');
   }
   return '';
 }
@@ -1222,6 +1283,8 @@ function bindEvents() {
   $('#themeToggle').addEventListener('click', () => {
     applyTheme(document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark');
   });
+  $('#selfUpdate').addEventListener('click', updateSelf);
+  $('#selfRestart').addEventListener('click', restartServer);
   $('#aiSave').addEventListener('click', saveAi);
   $('#aiTest').addEventListener('click', testAi);
   $('#tokenForm').addEventListener('submit', (event) => {

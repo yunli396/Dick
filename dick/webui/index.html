@@ -189,6 +189,15 @@
           <dl class="kv" id="runtimeInfo"></dl>
         </article>
         <article class="card">
+          <h2>DICK 自己</h2>
+          <p class="muted" id="selfState">读取中…</p>
+          <div class="btn-row">
+            <button class="btn" id="selfUpdate">更新 DICK</button>
+            <button class="btn" id="selfRestart">重启服务</button>
+          </div>
+          <p class="muted small" id="selfHint"></p>
+        </article>
+        <article class="card">
           <h2>访问令牌</h2>
           <p class="muted">接口的令牌保护，用来挡住同一网络里的其它设备。服务端的令牌在启动横幅里，也写在配置目录的 <code>web-token</code> 文件里；换设备时把同一个令牌填进去即可。</p>
           <label class="span-2">本机保存的令牌<input class="input" id="tokenValue" type="password"

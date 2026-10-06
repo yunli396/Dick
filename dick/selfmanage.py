@@ -65,10 +65,15 @@ def run_command(command, cwd=None):
 
 
 def _prefix_below(path):
-    """<前缀>/share/dick/venv/bin/<命令> → <前缀>；别的形状返回 None。"""
-    parents = path.parents
-    if len(parents) > 4 and [part.name for part in parents[:4]] == ["bin", "venv", "dick", "share"]:
-        return parents[4]
+    """<前缀>/share/dick/… → <前缀>；别的形状返回 None。
+
+    认两种形状：<前缀>/share/dick/venv/bin/<命令>（venv 里的解释器与控制台脚本）
+    和 <前缀>/share/dick/src/dick/<模块>.py（venv 里 import 的那份源码）。
+    """
+    parents = list(Path(path).parents)
+    for index in range(len(parents) - 1):
+        if parents[index].name == "dick" and parents[index + 1].name == "share":
+            return parents[index + 2] if index + 2 < len(parents) else None
     return None
 
 
@@ -85,6 +90,9 @@ def candidate_prefixes():
         prefix = _prefix_below(probe)
         if prefix is not None:
             found.append(prefix)
+    running = _prefix_below(Path(__file__).resolve())  # 优先认「正在跑的这份代码」
+    if running is not None:
+        found.append(running)
     found.extend([Path.home() / ".local", Path("/usr/local"), Path("/usr")])
     unique = []
     for path in found:
@@ -141,20 +149,39 @@ def system_layout():
     return None
 
 
+def running_layout():
+    """正在运行的这份代码来自哪里：装在前缀里就是那个前缀，源码工作区就是工作区。"""
+    prefix = _prefix_below(Path(__file__).resolve())
+    if prefix is not None:
+        found = script_layout(prefix)
+        if found is not None:
+            return found
+    return checkout_layout()
+
+
 def detect(prefix=None):
     if prefix is not None:
         found = script_layout(Path(prefix).expanduser())
         if found is None:
             raise DickError(f"{prefix} 下没有 install.sh 装出来的 DICK（没找到 share/dick）")
         return found
+    env = os.environ.get("DICK_PREFIX", "").strip()
+    if env:
+        found = script_layout(Path(env).expanduser())
+        if found is not None:
+            return found
+    # 正在跑的那份代码优先于 ~/.local 之类的默认位置：在源码工作区里跑 web 时，
+    # 「更新 DICK」要更新工作区，而不是另一个碰巧装好的 ~/.local。
+    found = running_layout()
+    if found is not None:
+        return found
     for candidate in candidate_prefixes():
         found = script_layout(candidate)
         if found is not None:
             return found
-    for probe in (checkout_layout, system_layout):
-        found = probe()
-        if found is not None:
-            return found
+    found = system_layout()
+    if found is not None:
+        return found
     return Installation(
         kind="unknown",
         hint="没找到 DICK 的安装位置；如果还没装，先按 README 的「一键安装」跑一次 install.sh。",

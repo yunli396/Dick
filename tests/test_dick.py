@@ -43,6 +43,7 @@ from dick.progress import Progress
 from dick.security import (certificate_names, ensure_certificate, interface_addresses, resolve_token,
                            ssl_context, token_path)
 from dick.syntax import Action, normalize, options
+from dick import web
 from dick.web import Handler, WebApp
 
 
@@ -1809,6 +1810,68 @@ class WebAppTests(FixtureTest):
             app.icon({"source": "pacman"}, {})
 
 
+    def test_status_reports_boot_id_and_the_install_layout(self):
+        app = self.app()
+        with patch("dick.web.discover", return_value=(self.REPOSITORIES, [])):
+            payload = app.status({}, {})
+        self.assertTrue(payload["boot"])
+        self.assertGreater(payload["pid"], 0)
+        self.assertIn(payload["self"]["kind"], {"script", "checkout", "system", "unknown"})
+
+    def test_self_update_job_reuses_the_cli_updater(self):
+        """网页的「更新 DICK」和 CLI 的 updateme 走同一条路，且提醒重启才生效。"""
+        app = self.app()
+        payload = {"success": True, "action": "updateme", "kind": "checkout",
+                   "location": "源码工作区：/tmp/x", "ref": "main", "before": "0.1.0", "after": "0.1.0",
+                   "commands": [["git", "-C", "/tmp/x", "pull", "--ff-only"]], "lines": [],
+                   "returncode": 0, "message": "源码工作区已更新到 main；重启 DICK 后新版本生效。"}
+        with patch.object(selfmanage, "run_update", return_value=payload) as updater:
+            created = app.action({}, {"action": "updateme", "confirm": True})
+            snapshot = self.wait(app, created["job"]["id"])
+        self.assertEqual(snapshot["status"], "done")
+        self.assertTrue(snapshot["result"]["restart_required"])
+        self.assertIsNone(updater.call_args.args[1].ref)
+        log = "\n".join(snapshot["lines"])
+        self.assertIn("git -C /tmp/x pull --ff-only", log)
+        self.assertIn("重启 DICK 服务后新版本才会生效", log)
+
+    def test_self_update_job_fails_with_the_hint_on_a_system_install(self):
+        app = self.app()
+        hint = "DICK 由系统 Python 提供，请用包管理器更新"
+        with patch.object(selfmanage, "detect",
+                          return_value=selfmanage.Installation("system", hint=hint)):
+            created = app.action({}, {"action": "updateme", "confirm": True})
+            snapshot = self.wait(app, created["job"]["id"])
+        self.assertEqual(snapshot["status"], "failed")
+        self.assertIn(hint, snapshot["error"])
+
+    def test_self_update_rejects_bad_ref_targets_and_missing_confirm(self):
+        app = self.app()
+        with self.assertRaisesRegex(DickError, "ref"):
+            app.action({}, {"action": "updateme", "confirm": True, "ref": "-x"})
+        with self.assertRaisesRegex(DickError, "不接受 targets"):
+            app.action({}, {"action": "updateme", "confirm": True, "targets": ["dick"]})
+        with self.assertRaisesRegex(DickError, "confirm"):
+            app.action({}, {"action": "updateme"})
+
+    def test_restart_re_execs_the_same_command_line(self):
+        app = self.app()
+        with self.assertRaisesRegex(DickError, "confirm"):
+            app.restart({}, {})
+        calls = []
+        with patch("dick.web.RESTART_MIN_DELAY", 0.01), \
+                patch("dick.web.os.execv", side_effect=lambda *arguments: calls.append(arguments)):
+            answer = app.restart({}, {"confirm": True, "delay": 0.01})
+            deadline = time.time() + 3
+            while time.time() < deadline and not calls:
+                time.sleep(0.02)
+        self.assertTrue(answer["ok"])
+        self.assertEqual(answer["boot"], web.BOOT_ID)
+        self.assertEqual(len(calls), 1)
+        program, argv = calls[0]
+        self.assertEqual(program, sys.executable)
+        self.assertEqual(argv, list(getattr(sys, "orig_argv", None) or [sys.executable, "-m", "dick"]))
+
 class CatalogTests(unittest.TestCase):
     """精选目录是纯静态数据，这里只校验它自身自洽。"""
 
@@ -2036,6 +2099,42 @@ class WebHttpTests(FixtureTest):
             self.assertIn(marker, script)
         _, _, styles = self.request("/assets/app.css")
         self.assertIn(b"[hidden] { display: none !important; }", styles)
+
+    def test_static_assets_keep_the_self_management_card(self):
+        """设置页的「更新 DICK / 重启服务」和它们的前端逻辑必须一直在。"""
+        _, _, home = self.request("/")
+        for marker in (b'id="selfState"', b'id="selfUpdate"', b'id="selfRestart"', b'id="selfHint"'):
+            self.assertIn(marker, home)
+        _, _, script = self.request("/assets/app.js")
+        for marker in (b"updateSelf", b"restartServer", b"waitForRestart", b"/api/self/restart",
+                       b"boot"):
+            self.assertIn(marker, script)
+
+    def test_restart_endpoint_needs_confirm_and_returns_the_command(self):
+        status, content_type, body = self.request("/api/self/restart", "POST", {})
+        self.assertEqual(status, 400)
+        self.assertEqual(content_type, "application/json; charset=utf-8")
+        self.assertIn("confirm", json.loads(body)["error"])
+        calls = []
+        with patch("dick.web.RESTART_MIN_DELAY", 0.01), \
+                patch("dick.web.os.execv", side_effect=lambda *arguments: calls.append(arguments)):
+            status, _, body = self.request("/api/self/restart", "POST",
+                                           {"confirm": True, "delay": 0.01})
+            payload = json.loads(body)
+            deadline = time.time() + 3
+            while time.time() < deadline and not calls:
+                time.sleep(0.02)
+        self.assertEqual(status, 200)
+        self.assertTrue(payload["ok"])
+        self.assertTrue(payload["command"])
+        self.assertEqual(len(calls), 1)
+
+    def test_status_over_http_exposes_the_boot_id(self):
+        status, _, body = self.request("/api/status")
+        self.assertEqual(status, 200)
+        payload = json.loads(body)
+        self.assertEqual(payload["boot"], web.BOOT_ID)
+        self.assertIn("can_update", payload["self"])
 
     def test_static_assets_keep_the_token_gate_and_privilege_prompt(self):
         """令牌门、提权密码框、令牌清洗必须一直待在静态资源里（都是纯前端逻辑）。"""

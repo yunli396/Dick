@@ -15,6 +15,7 @@ import hmac
 import html
 import json
 import math
+import os
 import re
 import ssl
 import sys
@@ -25,12 +26,13 @@ import webbrowser
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from types import SimpleNamespace
 from urllib import error as urlerror
 from urllib import request as urlrequest
 from urllib.parse import parse_qs, quote, urlparse
 from datetime import date
 
-from . import __version__, catalog
+from . import __version__, catalog, selfmanage
 from .ai import Translator
 from .cache import Cache
 from .config import SOURCES, Settings
@@ -46,6 +48,11 @@ from .security import ensure_certificate, resolve_token, ssl_context
 
 WEBUI = Path(__file__).with_name("webui")
 USER_AGENT = f"dick-web/{__version__}"
+# 每次启动换一个编号：网页靠它确认「重启之后确实是新进程」。
+BOOT_ID = uuid.uuid4().hex[:8]
+# 重启前留一点时间把响应写完（下限可在测试里调小）。
+RESTART_MIN_DELAY = 0.2
+RESTART_DELAY = 0.8
 FLATHUB_ICON = "https://dl.flathub.org/repo/appstream/x86_64/icons/128x128/{name}.png"
 FLATHUB_SEARCH = "https://flathub.org/api/v2/search"
 SNAPCRAFT_DETAILS = "https://api.snapcraft.io/api/v1/snaps/details/{name}?fields=icon_url"
@@ -321,6 +328,7 @@ class WebApp:
             ("GET", "/api/candidates"): self.candidates,
             ("GET", "/api/package"): self.package,
             ("POST", "/api/action"): self.action,
+            ("POST", "/api/self/restart"): self.restart,
             ("GET", "/api/ai"): self.ai_status,
             ("POST", "/api/ai"): self.ai_save,
             ("POST", "/api/ai/test"): self.ai_test,
@@ -424,7 +432,25 @@ class WebApp:
                 "priority": list(self.settings.priority), "sources": entries, "errors": errors,
                 "version": __version__, "config_path": str(self.settings.config_path),
                 "cache_dir": str(self.settings.cache_dir), "root": str(self.settings.root),
-                "ai": self.translator.describe(), "offline": self.icons.offline}
+                "ai": self.translator.describe(), "offline": self.icons.offline,
+                "boot": BOOT_ID, "pid": os.getpid(), "self": self.describe_self()}
+
+    def describe_self(self):
+        """设置页要显示的「DICK 自己装在哪、能不能自己更新」。"""
+        try:
+            installation = selfmanage.detect()
+        except DickError as error:
+            return {"kind": "unknown", "location": "", "hint": str(error), "can_update": False}
+        except Exception as error:  # noqa: BLE001 - 探测失败不该拖垮整个设置页
+            return {"kind": "unknown", "location": "",
+                    "hint": f"无法判断安装位置：{type(error).__name__}: {error}", "can_update": False}
+        ref = os.environ.get("DICK_REF") or selfmanage.DEFAULT_REF
+        try:
+            can_update = bool(selfmanage.update_commands(installation, ref))
+        except Exception:  # noqa: BLE001
+            can_update = False
+        return {"kind": installation.kind, "location": installation.describe(),
+                "hint": installation.hint, "can_update": can_update}
 
     # ---- 首页精选 -----------------------------------------------------------
 
@@ -655,17 +681,19 @@ class WebApp:
 
     def action(self, query, body):
         kind = (body.get("action") or "").strip()
-        if kind not in {"install", "remove", "upgrade", "update"}:
-            raise DickError("action 必须是 install、remove、upgrade 或 update")
+        if kind not in {"install", "remove", "upgrade", "update", "updateme"}:
+            raise DickError("action 必须是 install、remove、upgrade、update 或 updateme")
         dry_run = bool(body.get("dry_run"))
         confirm = bool(body.get("confirm"))
         if not dry_run and not confirm:
             raise DickError("真正的系统变更需要 confirm=true；请先用演练模式预览命令")
-        if not dry_run and self.settings.root.resolve() != Path("/").resolve():
+        if not dry_run and kind != "updateme" and self.settings.root.resolve() != Path("/").resolve():
             raise DickError("--root 只用于读取源配置；系统变更请在真实根目录下执行，或使用演练模式")
         sources = body.get("sources")
-        if sources is None:
+        if sources is None and kind != "updateme":
             sources = self.sources_param(query, installed=kind == "remove")
+        elif sources is None:
+            sources = []
         elif not isinstance(sources, list) or any(item not in SOURCES for item in sources):
             raise DickError("sources 必须是来源列表")
         targets = body.get("targets") or []
@@ -683,9 +711,13 @@ class WebApp:
             raise DickError("install 需要 targets")
         if kind == "remove" and not targets and not packages:
             raise DickError("remove 需要 targets 或 packages")
-        if kind in {"upgrade", "update"} and targets:
+        if kind in {"upgrade", "update", "updateme"} and targets:
             raise DickError(f"{kind} 不接受 targets")
-        title = {"install": "安装", "remove": "卸载", "upgrade": "整机升级", "update": "刷新索引"}[kind]
+        ref = (body.get("ref") or "").strip()
+        if ref and (ref.startswith("-") or not re.fullmatch(r"[A-Za-z0-9._/-]+", ref)):
+            raise DickError("ref 只能是分支或标签名")
+        title = {"install": "安装", "remove": "卸载", "upgrade": "整机升级", "update": "刷新索引",
+                 "updateme": "更新 DICK"}[kind]
         if kind == "remove":
             title = "卸载 " + "、".join(targets[:3] or [item["name"] for item in packages[:3]])
         elif kind == "install":
@@ -702,11 +734,15 @@ class WebApp:
                 raise DickError(f"sudo 密码连续输错，请 {wait} 秒后再试（手动安装可在宿主终端直接执行）")
         payload = {"action": kind, "targets": targets, "sources": sources, "deep": deep,
                    "packages": packages, "dry_run": dry_run, "confirm": confirm,
-                   "password": bool(password)}
+                   "password": bool(password), "ref": ref or None}
 
         def worker(job):
             nonlocal password
             try:
+                if kind == "updateme":
+                    job.log(f"{title}：{'演练' if dry_run else '执行'}"
+                            + (f"（分支 {ref}）" if ref else ""))
+                    return self.job_self_update(job, ref or None, dry_run)
                 job.log(f"{title}：{'演练' if dry_run else '执行'}；来源 " + "、".join(sources))
                 if kind == "install":
                     result = self.job_install(job, targets, sources, dry_run, yes, password)
@@ -832,6 +868,48 @@ class WebApp:
             cache.close()
         job.log(f"刷新完成：成功 {len(results)} 个仓库，失败 {len(failures)} 个")
         return {"refreshed": results, "errors": failures}
+
+    # ---------------------------------------------------------------- 自管理
+
+    def job_self_update(self, job, ref=None, dry_run=False):
+        """网页里的「更新 DICK」：直接复用 CLI 的 updateme。"""
+        args = SimpleNamespace(prefix=None, ref=ref, dry_run=dry_run, yes=True)
+        payload = selfmanage.run_update(self.settings, args)
+        job.log(f"安装位置：{payload['location']}")
+        for command in payload["commands"]:
+            job.log(("将执行：" if dry_run else "执行：") + " ".join(str(part) for part in command))
+        if not payload["success"]:
+            raise DickError(payload.get("error") or payload["message"])
+        job.log(payload["message"])
+        if not dry_run and payload["commands"]:
+            payload["restart_required"] = True
+            job.log("提示：重启 DICK 服务后新版本才会生效（设置页的「重启服务」）。")
+        return payload
+
+    def restart(self, query, body):
+        """重启服务进程：先把响应写完，再原地重起（新进程会重新加载代码）。"""
+        if not body.get("confirm"):
+            raise DickError("重启服务需要 confirm=true")
+        try:
+            delay = float(body.get("delay", RESTART_DELAY))
+        except (TypeError, ValueError):
+            raise DickError("delay 必须是秒数")
+        delay = min(max(delay, RESTART_MIN_DELAY), 30.0)
+        argv = list(getattr(sys, "orig_argv", None) or [sys.executable, "-m", "dick", *sys.argv[1:]])
+        app = self
+
+        def reboot():
+            time.sleep(delay)
+            try:
+                os.execv(sys.executable, argv)
+            except OSError as error:  # 起不来就留着旧进程，至少页面还能回话
+                app.restart_error = str(error)
+                print(f"重启失败：{error}", file=sys.stderr, flush=True)
+
+        self.restart_error = None
+        threading.Thread(target=reboot, daemon=True, name="dick-restart").start()
+        return {"ok": True, "pid": os.getpid(), "boot": BOOT_ID, "command": argv,
+                "delay": delay, "message": f"{delay:.1f} 秒后重启服务，页面稍后自动恢复。"}
 
     # ---------------------------------------------------------------- AI 翻译
 
