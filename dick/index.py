@@ -182,7 +182,7 @@ class Index:
 
     def _aur(self, query, exact):
         key = ("info:" if exact else "search:") + query
-        cached = self.cache.query_get("aur", key, self.settings.ttl)
+        cached = self.cache.query_get("aur", key, self.settings.query_ttl("aur"))
         if cached is not None:
             return cached
         base = "https://aur.archlinux.org/rpc/v5/"
@@ -207,7 +207,7 @@ class Index:
 
     def _snap(self, query, exact):
         key = ("info:" if exact else "search:") + query
-        cached = self.cache.query_get("snap", key, self.settings.ttl)
+        cached = self.cache.query_get("snap", key, self.settings.query_ttl("snap"))
         if cached is not None:
             return cached
         output = native_output(["snap", "find", query])
@@ -221,7 +221,7 @@ class Index:
 
     def _linyaps(self, query, exact):
         key = ("info:" if exact else "search:") + query
-        cached = self.cache.query_get("linyaps", key, self.settings.ttl)
+        cached = self.cache.query_get("linyaps", key, self.settings.query_ttl("linyaps"))
         if cached is not None:
             return cached
         output = native_output(["ll-cli", "--json", "search", query],
@@ -272,7 +272,7 @@ class Index:
         匹配由 guix 自己做（大小写不敏感、只匹配名称），exact 时这里再筛一遍。
         """
         key = ("info:" if exact else "search:") + query
-        cached = self.cache.query_get("guix", key, self.settings.ttl)
+        cached = self.cache.query_get("guix", key, self.settings.query_ttl("guix"))
         if cached is not None:
             return cached
         output = native_output(["guix", "package", "-A", literal_regexp(query)],
@@ -298,7 +298,7 @@ class Index:
         这样搜索结果和 `nix profile install nixpkgs#<包名>` 能对上。
         """
         key = ("info:" if exact else "search:") + query
-        cached = self.cache.query_get("nixpkgs", key, self.settings.ttl)
+        cached = self.cache.query_get("nixpkgs", key, self.settings.query_ttl("nixpkgs"))
         if cached is not None:
             return cached
         try:

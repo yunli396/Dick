@@ -24,6 +24,11 @@ PRIORITIES = {
 }
 # 大多数来源的可用性看同名可执行文件，这里只列出名字不一致的。
 EXECUTABLES = {"apt": "apt-get", "linyaps": "ll-cli", "nixpkgs": "nix"}
+# 按需查询来源（没有可下载索引的那几个）的缓存有效期，单位秒。guix 与 nixpkgs 每查一次
+# 都要现跑一次慢速原生命令，所以默认给一天，而不是跟着 [cache] ttl 的 15 分钟；
+# 它们的结果随上游演变很慢，等一次 `dick update` 或 TTL 到期都不亏。可在
+# [cache.query_ttl] 里逐个来源覆盖。
+QUERY_TTL_DEFAULTS = {"guix": 86400, "nixpkgs": 86400}
 
 
 def system_family(root):
@@ -68,6 +73,7 @@ class Settings:
             cache = self.data.get("cache", {})
             network = self.data.get("network", {})
             self.ttl = int(cache.get("ttl", 900))
+            configured_query_ttls = cache.get("query_ttl", {})
             self.timeout = float(network.get("timeout", 20))
             self.max_bytes = int(network.get("max_bytes", 64 * 1024 * 1024))
             configured_workers = network.get("workers", 4)
@@ -100,11 +106,29 @@ class Settings:
         self.priority = [source for source in self.priority if source != LAST_SOURCE] + [LAST_SOURCE]
         if self.ttl < 0 or not math.isfinite(self.timeout) or self.timeout <= 0 or self.max_bytes <= 0 or self.workers <= 0:
             raise DickError("缓存 TTL 不能为负数，网络限制和并发数必须大于零")
+        self.query_ttls = self._query_ttls(configured_query_ttls)
         self.ai = self._ai_settings(ai)
         (self.web_host, self.web_port, self.web_tls,
          self.web_cert, self.web_key, self.web_token) = self._web_settings(web)
         cache_home = Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache"))
         self.cache_dir = Path(cache_dir) if cache_dir else cache_home / "dick"
+
+    def _query_ttls(self, configured):
+        """合并 [cache.query_ttl] 与默认值，得到「来源 → 缓存秒数」的映射。"""
+        table = dict(QUERY_TTL_DEFAULTS)
+        if not isinstance(configured, dict):
+            raise DickError("cache.query_ttl 必须是「来源 = 秒数」的表")
+        for source, seconds in configured.items():
+            if source not in SOURCES:
+                raise DickError("cache.query_ttl 的键必须是已知来源：" + ", ".join(SOURCES))
+            if isinstance(seconds, bool) or not isinstance(seconds, int) or seconds < 0:
+                raise DickError(f"cache.query_ttl.{source} 必须是不小于零的整数秒")
+            table[source] = seconds
+        return table
+
+    def query_ttl(self, source):
+        """某个来源的按需查询缓存有效期：没有单独配置就用 [cache] ttl。"""
+        return self.query_ttls.get(source, self.ttl)
 
     def _ai_settings(self, ai):
         """解析 [ai] 段，环境变量优先于配置文件；未启用或没有密钥时 configured 为假。"""

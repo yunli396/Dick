@@ -24,6 +24,13 @@ order = ["apk", "flatpak", "linyaps", "guix", "nixpkgs", "snap"]
 [cache]
 ttl = 900
 
+# 按需查询来源（aur / snap / linyaps / guix / nixpkgs）的缓存有效期，单位秒；
+# 这里没写的来源用上面的 ttl。guix 与 nixpkgs 每查一次都要现跑一次慢速原生命令，
+# 所以默认给一天，想更实时可以调小（0 表示不缓存）。
+[cache.query_ttl]
+guix = 86400
+nixpkgs = 86400
+
 [network]
 timeout = 20
 max_bytes = 67108864

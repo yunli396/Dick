@@ -91,10 +91,10 @@ dick web            # 然后打开 http://127.0.0.1:3907
 | APT | `.list` / Deb822 `.sources` → 各组件与架构的 `Packages` | `dpkg-query -W` / `apt-get remove\|purge` | `apt-get install` | 基础实现，xz/gzip/未压缩索引、平铺仓库、多文件合并 |
 | DNF | `.repo` → `repomd.xml` → primary XML | `rpm -qa` / `dnf remove` | `dnf install` | 基础实现，baseurl/mirrorlist/metalink、元数据 checksum、架构筛选 |
 | APK（Alpine） | `/etc/apk/repositories` → `{架构}/APKINDEX.tar.gz` 内的 `APKINDEX` | `/lib/apk/db/installed` / `apk del` | `apk add --no-cache` | Alpine 原生索引，解析单字母字段（`P`/`V`/`T`/`A`）；`@tag` 标记会被忽略，仓库名取 URL 末两段（`v3.20/main`） |
-| Snap | `snap find` 的列表输出 | `snap list` / `snap remove` | `snap install` | 已安装 Snap 时按需查询，TTL 缓存 |
-| Linyaps（如意玲珑） | `ll-cli --json search` 的 JSON | `ll-cli --json list --type=app` / `ll-cli uninstall` | `ll-cli install ID` | 已安装 `ll-cli` 时按需查询，TTL 缓存；仓库来自 `ll-cli --json repo show`，读取失败时退化为单一 `linglong` 仓库 |
-| Guix | `guix package -A <正则>` 的四列表格 | `guix package --list-installed` / `guix remove` | `guix install` | 已安装 `guix` 时按需查询，TTL 缓存；查询按包名匹配（大小写不敏感），`-A` 不输出描述，所以描述列为空；装进用户自己的 profile，不加 sudo |
-| Nixpkgs | `nix search --json nixpkgs <正则>` | `nix profile list --json` / `nix profile remove` | `nix profile install nixpkgs#名称` | 已安装 Nix 时按需查询，TTL 缓存；需要 Nix 2.4+ 的新 CLI（flake），未开启 `experimental-features = nix-command flakes` 时会给出提示；属性路径去掉 `legacyPackages.<系统>.` 前缀当名称；装进用户 profile，不加 sudo |
+| Snap | `snap find` 的列表输出 | `snap list` / `snap remove` | `snap install` | 已安装 Snap 时按需查询，查询缓存默认 15 分钟 |
+| Linyaps（如意玲珑） | `ll-cli --json search` 的 JSON | `ll-cli --json list --type=app` / `ll-cli uninstall` | `ll-cli install ID` | 已安装 `ll-cli` 时按需查询，查询缓存默认 15 分钟；仓库来自 `ll-cli --json repo show`，读取失败时退化为单一 `linglong` 仓库 |
+| Guix | `guix package -A <正则>` 的四列表格 | `guix package --list-installed` / `guix remove` | `guix install` | 已安装 `guix` 时按需查询，查询缓存默认一天（`[cache.query_ttl]`）；查询按包名匹配（大小写不敏感），`-A` 不输出描述，所以描述列为空；装进用户自己的 profile，不加 sudo |
+| Nixpkgs | `nix search --json nixpkgs <正则>` | `nix profile list --json` / `nix profile remove` | `nix profile install nixpkgs#名称` | 已安装 Nix 时按需查询，查询缓存默认一天（`[cache.query_ttl]`）；需要 Nix 2.4+ 的新 CLI（flake），未开启 `experimental-features = nix-command flakes` 时会给出提示；属性路径去掉 `legacyPackages.<系统>.` 前缀当名称；装进用户 profile，不加 sudo |
 
 Pacman/APT/DNF/APK 搜索不执行 `pacman -Ss`、`apt search`、`dnf search` 或 `apk search`。Flatpak 的 OSTree/AppStream 数据需要额外协议和解析依赖，Snap 商店、Linyaps 仓库、Guix 与 Nixpkgs 也没有本原型采用的稳定公开全量索引格式（Linyaps 依赖 `ll-cli` 自己输出 JSON，Guix 用 `guix package -A`，Nixpkgs 用 `nix search --json`），所以按需求允许的例外使用原生命令。Flatpak/Snap/Linyaps 版本过旧、无远端或输出完全无法解析时会报告错误（Flatpak 的列数变化会被容忍，见上表）。
 
@@ -128,7 +128,7 @@ dick source scan --json
 
 SQLite 默认在 `$XDG_CACHE_HOME/dick/index.sqlite3`，未设置时为 `~/.cache/dick/index.sqlite3`。第一次搜索缺少本地快照时自动拉取所选来源的索引；后续直接查本地快照，通过 `dick update` 手动更新。刷新逐仓库事务提交，下载或解析失败会保留该仓库上一次成功快照，其他仓库可以继续刷新。已移除或已禁用的源不参与搜索。
 
-AUR/Snap/Linyaps/Guix/Nixpkgs 没有全量本地索引，查询结果按关键词缓存，`dick update` 会清空它们的查询缓存。查询失败会打印警告，跨源搜索仍展示成功来源；JSON 的 `errors` 字段保留失败信息。完整刷新有任意失败时返回非零状态。
+AUR/Snap/Linyaps/Guix/Nixpkgs 没有全量本地索引，查询结果按关键词缓存，默认 15 分钟；Guix 与 Nixpkgs 每查一次都要现跑一次慢速原生命令，默认缓存一天（可用 `[cache.query_ttl]` 逐来源调整）。`dick update` 会清空它们的查询缓存。查询失败会打印警告，跨源搜索仍展示成功来源；JSON 的 `errors` 字段保留失败信息。完整刷新有任意失败时返回非零状态。
 
 ## 本机列表与卸载
 
@@ -221,6 +221,12 @@ order = ["apk", "flatpak", "linyaps", "guix", "nixpkgs", "snap"]
 
 [cache]
 ttl = 900
+
+# 按需查询来源的缓存有效期，没写的来源用上面的 ttl。
+# guix 与 nixpkgs 每查一次都要现跑一次慢速原生命令，所以默认给一天。
+[cache.query_ttl]
+guix = 86400
+nixpkgs = 86400
 
 [network]
 timeout = 20

@@ -602,6 +602,23 @@ class IndexTests(FixtureTest):
         self.assertEqual([call.args[0][-1] for call in output.call_args_list], ["g\\+\\+", "g\\+\\+"])
 
 
+    def test_query_cache_ttl_is_per_source(self):
+        """按需来源各用各的缓存有效期：guix 一天，aur 等仍跟全局 ttl 走。"""
+        index = self.index([Repository("guix", "guix", ()), Repository("aur", "aur", ())])
+        with patch.object(index.cache, "query_get", return_value=None) as query_get, \
+                patch("dick.index.native_output", return_value=""):
+            index.search("firefox", ["guix"])
+            index.search("firefox", ["aur"])
+        ttls = {call.args[0]: call.args[2] for call in query_get.call_args_list}
+        self.assertEqual(ttls["guix"], 86400)
+        self.assertEqual(ttls["aur"], index.settings.ttl)
+        index.settings.query_ttls["guix"] = 60  # [cache.query_ttl] 的覆盖值要真的传到缓存
+        with patch.object(index.cache, "query_get", return_value=None) as query_get, \
+                patch("dick.index.native_output", return_value=""):
+            index.search("firefox", ["guix"])
+        self.assertEqual(query_get.call_args.args[2], 60)
+
+
 class ConfigTests(FixtureTest):
     def test_sources_default_to_all_enabled(self):
         self.assertEqual(self.settings.enabled_sources, SOURCES)
@@ -663,6 +680,28 @@ class ConfigTests(FixtureTest):
         with patch("dick.config.shutil.which",
                    side_effect=lambda command: "/usr/bin/nix" if command == "nix" else None):
             self.assertTrue(settings.available("nixpkgs"))
+
+    def test_query_cache_ttl_defaults_and_overrides(self):
+        """guix/nixpkgs 每查一次都要现跑慢速原生命令，所以查询缓存默认给一天而不是 15 分钟。"""
+        settings = Settings(self.config, self.root, self.root / "ttl-cache", create=True)
+        self.assertEqual(settings.ttl, 900)
+        self.assertEqual(settings.query_ttl("guix"), 86400)
+        self.assertEqual(settings.query_ttl("nixpkgs"), 86400)
+        self.assertEqual(settings.query_ttl("aur"), 900)
+        custom = self.write("query-ttl.toml",
+                            "[cache]\nttl = 60\n[cache.query_ttl]\nguix = 7200\nsnap = 0\n")
+        tuned = Settings(custom, self.root, self.root / "ttl-cache-2", create=True)
+        self.assertEqual(tuned.query_ttl("guix"), 7200)
+        self.assertEqual(tuned.query_ttl("snap"), 0)
+        self.assertEqual(tuned.query_ttl("nixpkgs"), 86400)  # 没写的来源保留默认
+        self.assertEqual(tuned.query_ttl("linyaps"), 60)     # 其余按需来源跟全局 ttl
+        for broken in ('[cache.query_ttl]\nfirefox = 60\n',
+                       '[cache.query_ttl]\nguix = "一天"\n',
+                       '[cache.query_ttl]\nguix = -1\n'):
+            with self.subTest(broken=broken):
+                with self.assertRaises(DickError):
+                    Settings(self.write("broken-ttl.toml", broken), self.root,
+                             self.root / "ttl-cache-3", create=True)
 
     def test_every_family_default_priority_ends_with_snap(self):
         for family, order in PRIORITIES.items():
