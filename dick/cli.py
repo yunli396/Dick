@@ -7,7 +7,7 @@ from .cache import Cache
 from .config import SOURCES, Settings
 from .discovery import discover
 from .index import Index
-from .install import Installer
+from .install import AUR_HELPER_HINT, Installer, aur_helper
 from .local import matches, rank, read_installed
 from .models import DickError
 from .network import HTTPClient
@@ -62,7 +62,19 @@ def update_sources(settings, action, args):
     return 0
 
 
+def source_hints(settings):
+    """与仓库配置无关、但用户会关心的环境提示。
+
+    Arch 系默认带 aur 来源，可 AUR 自己不会构建包：得先有一个 AUR 助手（paru/yay）。
+    缺少时不报错，只在 source list / scan 里点一句怎么装。
+    """
+    if settings.family == "arch" and settings.enabled("aur") and aur_helper() is None:
+        return [AUR_HELPER_HINT]
+    return []
+
+
 def show_sources(settings, action, args, repositories, errors):
+    hints = source_hints(settings)
     entries = []
     for source in args.source or list(SOURCES):
         found = [repository for repository in repositories if repository.source == source]
@@ -76,7 +88,7 @@ def show_sources(settings, action, args, repositories, errors):
         })
     if args.json:
         emit({"family": settings.family, "priority": list(settings.priority),
-              "sources": entries, "errors": errors})
+              "sources": entries, "errors": errors, "hints": hints})
         return 1 if errors else 0
     print(f"系统：{settings.family}；安装优先级：{' → '.join(settings.priority)}")
     for entry in entries:
@@ -88,6 +100,8 @@ def show_sources(settings, action, args, repositories, errors):
             print(f"  {repository['repository']}: {shown}")
         if not entry["repositories"]:
             print("  未识别到仓库配置。")
+    for hint in hints:
+        print(f"提示：{hint}")
     for error in errors:
         report(f"错误：{error}")
     if action.name == "source_list":

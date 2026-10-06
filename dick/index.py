@@ -1,18 +1,26 @@
 import hashlib
 import json
 from concurrent.futures import ThreadPoolExecutor, as_completed
+import os
+import re
 import threading
+import time
 from urllib.parse import quote, urlencode, urljoin
 import xml.etree.ElementTree as ET
 
 from .discovery import english_locale, native_output
 from .models import DickError, Package
-from .parsers import (NIX_FLAKE_FLAGS, apk_packages, apt_packages, dnf_packages,
-                      pacman_packages, strip_nix_attribute)
+from .network import decompress
+from .parsers import (NIX_FLAKE_FLAGS, apk_packages, appstream_metadata, apt_packages,
+                      dnf_packages, pacman_packages, strip_nix_attribute)
 
 
 # Sources without a stable public index: queried on demand and kept in the TTL query cache.
 QUERY_SOURCES = ("aur", "snap", "linyaps", "guix", "nixpkgs")
+
+# Flatpak 远程的 AppStream 目录（描述、版本都只在这里）有几 MB，官方一天也就更新一两次，
+# 所以按天缓存；过期后由下一次 `dick update` 换成新的。
+APPSTREAM_TTL = 86400
 
 # guix / nix 的按需查询都把关键词当成正则表达式；Nix 用的是 std::regex、Guix 用 POSIX
 # 扩展正则，用户输入里的元字符（含 `+` 或 `(` 的包名很常见）会被当成语法，这里一律转义成字面量。
@@ -86,10 +94,87 @@ class Index:
             return content
         raise DickError("DNF 仓库没有可用 primary XML 元数据")
 
-    def _flatpak_packages(self, repository):
+    def _flatpak_redirect(self, base):
+        """读仓库的 config，取里面的 redirect-url。
+
+        镜像站常常只同步仓库内容（objects/summary），AppStream 仍然指向官方站点，中科大镜像
+        就是这样：`https://mirrors.ustc.edu.cn/flathub/config` 里写着
+        `redirect-url=https://dl.flathub.org/repo/`。
+        """
+        try:
+            text = self.client.get(urljoin(base, "config")).decode("utf-8", errors="replace")
+        except (DickError, UnicodeDecodeError):
+            return None
+        match = re.search(r"^redirect-url\s*=\s*(\S+)\s*$", text, re.MULTILINE)
+        if not match:
+            return None
+        return urljoin(base, match.group(1)).rstrip("/") + "/"
+
+    def _appstream_file(self, repository):
+        return self.settings.cache_dir / "appstream" / f"{repository.source}-{repository.name}.xml.gz"
+
+    def _cached_appstream(self, repository):
+        """AppStream 压缩包按天缓存：它有几 MB，没必要每次 update 都重下一遍。"""
+        path = self._appstream_file(repository)
+        try:
+            if time.time() - path.stat().st_mtime < APPSTREAM_TTL:
+                return path.read_bytes()
+        except OSError:
+            return None
+        return None
+
+    def _remember_appstream(self, repository, content):
+        path = self._appstream_file(repository)
+        temporary = path.with_name(path.name + ".tmp")
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            temporary.write_bytes(content)
+            os.replace(temporary, path)
+        except OSError:
+            temporary.unlink(missing_ok=True)
+
+    def _flatpak_appstream(self, repository, download=True):
+        """从远程仓库取 AppStream 目录，返回 {组件 id: 字段}；取不到就返回空字典。
+
+        先试远程地址本身（自建镜像、企业源可能自己放了这份数据），再试 config 里的
+        redirect-url。两个都拿不到不是错误：只是 flatpak 结果里没有描述和版本。
+
+        `download=False` 用于搜索触发的隐式刷新：只认缓存，绝不在搜索途中下几 MB 的元数据。
+        """
+        content = self._cached_appstream(repository)
+        if content is not None:
+            try:
+                return appstream_metadata(decompress(content, str(self._appstream_file(repository))))
+            except (DickError, ET.ParseError):
+                pass
+        if not download or not repository.urls:
+            return {}
+        base = repository.urls[0].rstrip("/") + "/"
+        bases = [base]
+        redirect = self._flatpak_redirect(base)
+        if redirect and redirect != base:
+            bases.append(redirect)
+        for candidate in bases:
+            for name in ("appstream.xml.gz", "appstream.xml"):
+                url = urljoin(candidate, f"appstream/{self.settings.architecture}/{name}")
+                try:
+                    content = self.client.get(url)
+                    metadata = appstream_metadata(decompress(content, url))
+                except (DickError, ET.ParseError):
+                    continue
+                if metadata:
+                    self._remember_appstream(repository, content)
+                    return metadata
+        return {}
+
+    def _flatpak_packages(self, repository, metadata=True):
         """flatpak ≥ 1.18 的 `remote-ls --columns=` 会静默丢掉它不认识的列（description、version
         就属于这类），四列请求只会回两列；所以优先读 `--json`，老版本再退回 TSV。两边的字段名都
         跟 locale 走，必须用 C 语言跑，否则 JSON 的键会变成「应用程序_id」。
+
+        `--json` 也只给 id、名字、分支、来源（version 全是空串），版本和描述要去仓库的
+        AppStream 里补（`metadata=False` 时只认本地缓存）。命名源（flatpak remotes）都来自
+        用户自己的配置，所以镜像源是天然生效的。
         """
         timeout = max(60, self.settings.timeout)
         try:
@@ -108,21 +193,37 @@ class Index:
                 label = str(entry.get("name") or "").strip()
                 version = str(entry.get("version") or "").strip()
                 packages.append(Package(name, "flatpak", label or name, version, repository.name))
-        if packages:
+        if not packages:
+            output = native_output(["flatpak", "remote-ls", "--app", "--columns=application,name,branch,origin",
+                                    repository.name], timeout=timeout, env=english_locale())
+            for line in output.splitlines():
+                fields = [field.strip() for field in line.split("\t")]
+                if len(fields) >= 2 and fields[0]:
+                    packages.append(Package(fields[0], "flatpak", fields[1] or fields[0], "", repository.name))
+                elif line.strip():
+                    raise DickError(f"Flatpak 输出不是预期的 TSV：{line.strip()[:120]}")
+        if not packages:
             return packages
-        output = native_output(["flatpak", "remote-ls", "--app", "--columns=application,name,branch,origin",
-                                repository.name], timeout=timeout, env=english_locale())
-        for line in output.splitlines():
-            fields = [field.strip() for field in line.split("\t")]
-            if len(fields) >= 2 and fields[0]:
-                packages.append(Package(fields[0], "flatpak", fields[1] or fields[0], "", repository.name))
-            elif line.strip():
-                raise DickError(f"Flatpak 输出不是预期的 TSV：{line.strip()[:120]}")
-        return packages
+        metadata_map = self._flatpak_appstream(repository, download=metadata)
+        if not metadata_map:
+            if metadata and repository.urls:
+                self._report(f"警告：{repository.name} 没有可用的 AppStream 元数据，"
+                             "flatpak 结果只有包名、没有描述和版本。")
+            return packages
+        enriched = []
+        for package in packages:
+            fields = metadata_map.get(package.name)
+            if not fields:
+                enriched.append(package)
+                continue
+            enriched.append(Package(package.name, "flatpak", fields["summary"] or package.description,
+                                    fields["version"] or package.version, repository.name,
+                                    package.architecture))
+        return enriched
 
-    def refresh_repository(self, repository):
+    def refresh_repository(self, repository, metadata=True):
         if repository.source == "flatpak":
-            return self.cache.replace(repository, self._flatpak_packages(repository))
+            return self.cache.replace(repository, self._flatpak_packages(repository, metadata=metadata))
         parsers = {"pacman": pacman_packages, "apt": apt_packages, "dnf": dnf_packages,
                    "apk": apk_packages}
         failures = []
@@ -346,7 +447,8 @@ class Index:
         for repository in selected:
             if repository.source not in QUERY_SOURCES and self.cache.snapshot(repository) is None:
                 try:
-                    self.refresh_repository(repository)
+                    # 搜索不该顺手下几 MB 的 AppStream：只在已有的按天缓存里取用。
+                    self.refresh_repository(repository, metadata=False)
                 except DickError as error:
                     failures.append(str(error))
         packages = [package for package in self.cache.search(query, sources, exact)

@@ -46,6 +46,16 @@ RUNNING_APP = re.compile(
     r"currently running|cannot be uninstalled|正在运行|运行中|正在被使用|in use", re.IGNORECASE
 )
 
+# AUR 自己没有安装命令：DICK 只准备 `paru -S aur/<包名>` 这样的命令，谁来构建由助手决定。
+AUR_HELPERS = ("paru", "yay")
+AUR_HELPER_HINT = ("没有找到 AUR 助手（paru 或 yay）；装 AUR 包前先装一个，例如："
+                   "sudo pacman -S paru")
+
+
+def aur_helper():
+    """返回本机可用的 AUR 助手名，没有就返回 None。"""
+    return next((candidate for candidate in AUR_HELPERS if shutil.which(candidate)), None)
+
 
 class Installer:
     def __init__(self, settings, index, report, dry_run=False, yes=False, stream=None, password=None):
@@ -240,9 +250,9 @@ class Installer:
         if source == "aur":
             if hasattr(os, "geteuid") and os.geteuid() == 0 and not self.dry_run:
                 raise DickError("AUR 构建必须以普通用户运行")
-            helper = next((candidate for candidate in ("paru", "yay") if shutil.which(candidate)), None)
+            helper = aur_helper()
             if helper is None:
-                raise DickError("AUR 安装需要已安装的 paru 或 yay")
+                raise DickError(AUR_HELPER_HINT)
             return [helper, "-S", *confirmation, "--", f"aur/{name}"]
         if source == "flatpak":
             return ["flatpak", "install", *(["-y"] if self.yes else []), "--", package.repository, name]

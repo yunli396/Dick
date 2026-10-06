@@ -38,8 +38,8 @@ from dick.install import Installer
 from dick.local import FILE_LISTS, LIST_COMMANDS, PARSERS, matches, rank, read_installed
 from dick.models import DickError, LocalPackage, Package, Repository
 from dick.network import HTTPClient, decompress
-from dick.parsers import (NIX_FLAKE_FLAGS, apk_packages, apt_packages, dnf_packages,
-                          pacman_packages, strip_nix_attribute)
+from dick.parsers import (NIX_FLAKE_FLAGS, apk_packages, appstream_metadata, apt_packages,
+                          dnf_packages, pacman_packages, strip_nix_attribute)
 from dick.progress import Progress
 from dick.security import (certificate_names, ensure_certificate, interface_addresses, resolve_token,
                            ssl_context, token_path)
@@ -301,6 +301,35 @@ class ParserTests(unittest.TestCase):
         self.assertEqual(strip_nix_attribute("packages.aarch64-darwin.firefox"), "firefox")
         self.assertEqual(strip_nix_attribute("firefox"), "firefox")
 
+    def test_appstream_metadata_keeps_the_source_language_and_newest_release(self):
+        """同一个 name/summary 会有一串 xml:lang 译文：认错就会把界面变成随机语言。"""
+        xml = b"""<?xml version="1.0" encoding="UTF-8"?>
+<components>
+  <component type="desktop-application">
+    <id>org.mozilla.firefox</id>
+    <name>Firefox</name>
+    <name xml:lang="zh_CN">\xe7\x81\xab\xe7\x8b\x90</name>
+    <summary>Fast, Private &amp; Safe Web Browser</summary>
+    <summary xml:lang="zh_CN">\xe5\xbf\xab\xe9\x80\x9f</summary>
+    <releases>
+      <release version="157.0.1" date="2025-06-01"/>
+      <release version="150.0" date="2025-04-01"/>
+      <release version="" date="2025-06-02"/>
+    </releases>
+  </component>
+  <component type="desktop-application">
+    <id>org.gnome.Calculator</id>
+    <name xml:lang="zh_TW">\xe8\xa8\x88\xe7\xae\x97\xe6\xa9\x9f</name>
+    <summary xml:lang="zh_TW">\xe7\xae\x97\xe4\xb8\x80\xe7\xae\x97</summary>
+  </component>
+</components>"""
+        metadata = appstream_metadata(xml)
+        self.assertEqual(metadata["org.mozilla.firefox"],
+                         {"name": "Firefox", "summary": "Fast, Private & Safe Web Browser",
+                          "version": "157.0.1"})
+        # 通篇没有源语言时，退回第一条译文总比空着好
+        self.assertEqual(metadata["org.gnome.Calculator"]["name"], "計算機")
+
     def test_expansion_and_zstd_limits(self):
         if zstd is None:
             self.skipTest("当前 Python 没有 compression.zstd")
@@ -480,6 +509,105 @@ class IndexTests(FixtureTest):
             packages, errors = index.search("firefox", ["flatpak"], exact=True)
         self.assertFalse(packages)
         self.assertIn("Flatpak 输出不是预期的 TSV：No matches found", errors[0])
+
+    APPSTREAM = b"""<?xml version="1.0" encoding="UTF-8"?>
+<components>
+  <component type="desktop-application">
+    <id>org.mozilla.firefox</id>
+    <name>Firefox</name>
+    <summary>Fast, Private &amp; Safe Web Browser</summary>
+    <releases><release version="157.0.1" date="2025-06-01"/></releases>
+  </component>
+</components>"""
+
+    def flatpak_index(self, urls, client):
+        """带上真实远程地址的 flatpak 索引：AppStream 要用它拼下载地址。"""
+        repository = Repository("flatpak", "flathub", urls)
+        return self.index([repository], client), repository
+
+    def test_flatpak_index_merges_the_remote_appstream(self):
+        """remote-ls 不给描述和版本，得去远程的 AppStream 目录里补。"""
+        def get(url):
+            if url.endswith("/appstream/x86_64/appstream.xml.gz"):
+                return gzip.compress(self.APPSTREAM)
+            raise DickError(f"404 {url}")
+
+        client = Mock()
+        client.get.side_effect = get
+        index, repository = self.flatpak_index(("https://mirror.example/flathub",), client)
+        payload = json.dumps([{"name": "Firefox", "application_id": "org.mozilla.firefox", "version": ""}])
+        with patch("dick.index.native_output", return_value=payload):
+            self.assertEqual(index.refresh_repository(repository), 1)
+            packages, errors = index.search("org.mozilla.firefox", ["flatpak"], exact=True)
+        self.assertFalse(errors)
+        self.assertEqual(packages[0].description, "Fast, Private & Safe Web Browser")
+        self.assertEqual(packages[0].version, "157.0.1")
+        self.assertEqual(client.get.call_args.args[0],
+                         "https://mirror.example/flathub/appstream/x86_64/appstream.xml.gz")
+        self.assertTrue((self.settings.cache_dir / "appstream" / "flatpak-flathub.xml.gz").exists())
+
+    def test_flatpak_appstream_is_cached_for_a_day(self):
+        """几 MB 的元数据没必要每次 update 都重下一遍。"""
+        client = Mock()
+        client.get.side_effect = lambda url: gzip.compress(self.APPSTREAM)
+        index, repository = self.flatpak_index(("https://mirror.example/flathub",), client)
+        payload = json.dumps([{"name": "Firefox", "application_id": "org.mozilla.firefox", "version": ""}])
+        with patch("dick.index.native_output", return_value=payload):
+            index.refresh_repository(repository)
+            downloads = client.get.call_count
+            self.assertEqual(index.refresh_repository(repository), 1)
+        self.assertEqual(client.get.call_count, downloads)          # 第二次全用缓存
+
+    def test_flatpak_search_never_downloads_appstream(self):
+        """搜索途中不该冒出一个几 MB 的下载：只在 update 时补齐元数据。"""
+        client = Mock()
+        client.get.side_effect = AssertionError("搜索不应发起下载")
+        index, _ = self.flatpak_index(("https://mirror.example/flathub",), client)
+        payload = json.dumps([{"name": "Firefox", "application_id": "org.mozilla.firefox", "version": ""}])
+        with patch("dick.index.native_output", return_value=payload):
+            packages, errors = index.search("org.mozilla.firefox", ["flatpak"], exact=True)
+        self.assertFalse(errors)
+        self.assertEqual(packages[0].description, "Firefox")
+        self.assertFalse([message for message in self.messages if "AppStream" in message])
+
+    def test_flatpak_appstream_follows_the_remote_redirect_url(self):
+        """中科大这类镜像只同步了仓库内容，AppStream 交给 config 里的 redirect-url。"""
+        requested = []
+
+        def get(url):
+            requested.append(url)
+            if url == "https://mirror.example/flathub/config":
+                return b"[Flatpak Repo]\nredirect-url=https://dl.flathub.org/repo/\n"
+            if url == "https://dl.flathub.org/repo/appstream/x86_64/appstream.xml.gz":
+                return gzip.compress(self.APPSTREAM)
+            raise DickError(f"404 {url}")
+
+        client = Mock()
+        client.get.side_effect = get
+        index, repository = self.flatpak_index(("https://mirror.example/flathub",), client)
+        payload = json.dumps([{"name": "Firefox", "application_id": "org.mozilla.firefox", "version": ""}])
+        with patch("dick.index.native_output", return_value=payload):
+            index.refresh_repository(repository)
+            packages, errors = index.search("org.mozilla.firefox", ["flatpak"], exact=True)
+        self.assertFalse(errors)
+        self.assertEqual(packages[0].version, "157.0.1")
+        # 先试远程自己的 appstream，再按 redirect-url 换到官方站点
+        self.assertEqual(requested[:2], ["https://mirror.example/flathub/config",
+                                         "https://mirror.example/flathub/appstream/x86_64/appstream.xml.gz"])
+        self.assertIn("https://dl.flathub.org/repo/appstream/x86_64/appstream.xml.gz", requested)
+
+    def test_flatpak_without_appstream_only_warns_and_keeps_the_index(self):
+        client = Mock()
+        client.get.side_effect = DickError("404 Not Found")
+        index, repository = self.flatpak_index(("https://mirror.example/flathub/",), client)
+        payload = json.dumps([{"name": "Firefox", "application_id": "org.mozilla.firefox", "version": ""}])
+        with patch("dick.index.native_output", return_value=payload):
+            self.assertEqual(index.refresh_repository(repository), 1)
+            packages, errors = index.search("org.mozilla.firefox", ["flatpak"], exact=True)
+        self.assertFalse(errors)                      # 缺元数据不算错误：只是描述和版本空着
+        self.assertEqual(packages[0].description, "Firefox")
+        self.assertEqual(packages[0].version, "")
+        self.assertTrue(any("AppStream" in message for message in self.messages))
 
     def test_snap_native_table_is_cached(self):
         index = self.index([Repository("snap", "snap-store", ())])
@@ -1281,6 +1409,23 @@ class CLITests(FixtureTest):
         code, output, _ = self.run_cli(self.common("--config", str(config), "--json", "source", "enable", "flatpak"))
         self.assertEqual(code, 0)
         self.assertIn("flatpak", json.loads(output)["enabled"])
+
+    def test_source_scan_suggests_installing_an_aur_helper(self):
+        """Arch 系默认带 aur 来源，可 AUR 自己不会构建包：缺 paru/yay 时要说清怎么装。"""
+        with patch("dick.cli.aur_helper", return_value=None):
+            code, output, _ = self.run_cli(self.common("--json", "source", "scan", "--source", "aur"))
+            self.assertEqual(code, 0)
+            self.assertIn("sudo pacman -S paru", json.loads(output)["hints"][0])
+            code, output, _ = self.run_cli(self.common("source", "scan", "--source", "aur"))
+            self.assertEqual(code, 0)
+            self.assertIn("提示：", output)
+            self.assertIn("sudo pacman -S paru", output)
+
+    def test_source_scan_keeps_quiet_when_an_aur_helper_exists(self):
+        with patch("dick.cli.aur_helper", return_value="paru"):
+            code, output, _ = self.run_cli(self.common("--json", "source", "scan", "--source", "aur"))
+        self.assertEqual(code, 0)
+        self.assertEqual(json.loads(output)["hints"], [])
 
     def test_list_reads_installed_packages_per_source(self):
         installed = {

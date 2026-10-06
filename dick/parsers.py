@@ -5,6 +5,9 @@ import xml.etree.ElementTree as ET
 from .models import DickError, Package
 from .network import decompress
 
+# AppStream 里带 xml:lang 的条目是译文；不带的那一份才是上游写给所有人看的源语言文本。
+XML_LANG = "{http://www.w3.org/XML/1998/namespace}lang"
+
 
 def strip_nix_attribute(attribute):
     """把 Nix 属性路径缩成包名。
@@ -149,3 +152,58 @@ def apk_packages(content, repository):
             raise DickError("APKINDEX.tar.gz 里没有 APKINDEX 文件")
     except (tarfile.TarError, OSError) as error:
         raise DickError(f"损坏的 APKINDEX.tar.gz：{error}") from error
+
+
+def _appstream_version(releases):
+    """AppStream 的版本号在 `<releases>` 里，一条一个 `<release version= date=>`。
+
+    取日期最新的一条：上游是按日期倒序写的，但顺序并不保证，所以按 date 自己挑。
+    """
+    newest, newest_date = "", ""
+    for release in releases:
+        version = (release.attrib.get("version") or "").strip()
+        if not version:
+            continue
+        date = (release.attrib.get("date") or "").strip()
+        if not newest or date > newest_date:
+            newest, newest_date = version, date
+    return newest
+
+
+def appstream_metadata(content):
+    """解析 Flatpak 远程的 AppStream 目录（appstream.xml），返回 {组件 id: 字段}。
+
+    `flatpak remote-ls --json` 只给 id、名字、分支和来源：版本永远是空串，更没有描述。
+    这些信息只存在于远程仓库的 AppStream 里，所以 `dick update --source flatpak` 会拉一份
+    来合并（大约 10 MB 压缩、50 MB 展开、解析一秒以内）。
+
+    同一个 name/summary 会有一串 xml:lang 译文，只认不带 lang 的源语言版本，结果才不会随
+    构建机的语言变化；实在没有源语言条目才退回第一条译文。
+    """
+    metadata = {}
+    for _event, component in ET.iterparse(io.BytesIO(content), events=("end",)):
+        if component.tag.rsplit("}", 1)[-1] != "component":
+            continue
+        fields = {"name": "", "summary": "", "version": ""}
+        fallback = {}
+        component_id = ""
+        for child in component:
+            tag = child.tag.rsplit("}", 1)[-1]
+            if tag == "id":
+                component_id = (child.text or "").strip()
+            elif tag in {"name", "summary"}:
+                text = " ".join((child.text or "").split())
+                if not text:
+                    continue
+                if XML_LANG in child.attrib:
+                    fallback.setdefault(tag, text)
+                else:
+                    fields[tag] = fields[tag] or text
+            elif tag == "releases":
+                fields["version"] = _appstream_version(child)
+        if component_id:
+            for tag in ("name", "summary"):
+                fields[tag] = fields[tag] or fallback.get(tag, "")
+            metadata.setdefault(component_id, fields)
+        component.clear()
+    return metadata

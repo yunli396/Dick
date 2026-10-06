@@ -93,8 +93,8 @@ dick web
 | 来源 | 搜索数据 | 本机列表 / 卸载 | 原生安装 | 当前范围 |
 | --- | --- | --- | --- | --- |
 | Pacman | `pacman.conf` 和递归 `Include` 中的 `Server` → `.db` | `pacman -Qn` / `pacman -R [-Rns]` | `pacman -S repo/name` | 首要链路，多镜像失败自动切换，zstd/gzip/xz/bzip2/未压缩 tar |
-| AUR | 官方 RPC v5 的 search/info | `pacman -Qm` / `pacman -R [-Rns]` | `paru` 或 `yay` | Arch 上按需查询，默认缓存 15 分钟；不自行下载或构建 PKGBUILD |
-| Flatpak | `flatpak remotes`、`flatpak remote-ls --json`（老版本退回 TSV） | `flatpak list --app` / `flatpak uninstall` | `flatpak install remote ID` | 已配置远端的应用，默认 Flatpak 安装作用域；`remote-ls` 不给描述与版本（1.18 起不认识的列会被静默丢弃），所以描述退回应用显示名 |
+| AUR | 官方 RPC v5 的 search/info | `pacman -Qm` / `pacman -R [-Rns]` | `paru` 或 `yay` | Arch 上按需查询，默认缓存 15 分钟；不自行下载或构建 PKGBUILD。DICK 只负责准备 `paru -S aur/名称` 这样的命令；PATH 里没有 `paru`/`yay` 时 `dick source list\|scan` 会提示 `sudo pacman -S paru` |
+| Flatpak | `flatpak remotes`、`flatpak remote-ls --json`（老版本退回 TSV）+ 远程仓库自己的 AppStream | `flatpak list --app` / `flatpak uninstall` | `flatpak install remote ID` | 远端的应用，默认 Flatpak 安装作用域；用的就是 `flatpak remotes` 列出的**你自己的**远程和镜像，`remote-ls` 不给描述与版本，所以 `dick update --source flatpak` 会再拉一份远程的 AppStream 目录（`appstream/<架构>/appstream.xml.gz`，约 10 MB，压缩包按天缓存在缓存目录的 `appstream/` 下，搜索不会触发下载）补齐描述与版本；远程地址取不到这份数据时会跟着仓库 `config` 里的 `redirect-url` 换到官方站点（中科大这类只镜像仓库内容的镜像是如此），两边都没有才退回只显示包名 |
 | APT | `.list` / Deb822 `.sources` → 各组件与架构的 `Packages` | `dpkg-query -W` / `apt-get remove\|purge` | `apt-get install` | 基础实现，xz/gzip/未压缩索引、平铺仓库、多文件合并 |
 | DNF | `.repo` → `repomd.xml` → primary XML | `rpm -qa` / `dnf remove` | `dnf install` | 基础实现，baseurl/mirrorlist/metalink、元数据 checksum、架构筛选 |
 | APK（Alpine） | `/etc/apk/repositories` → `{架构}/APKINDEX.tar.gz` 内的 `APKINDEX` | `/lib/apk/db/installed` / `apk del` | `apk add --no-cache` | Alpine 原生索引，解析单字母字段（`P`/`V`/`T`/`A`）；`@tag` 标记会被忽略，仓库名取 URL 末两段（`v3.20/main`） |
@@ -103,7 +103,7 @@ dick web
 | Guix | `guix package -A <正则>` 的四列表格 | `guix package --list-installed` / `guix remove` | `guix install` | 已安装 `guix` 时按需查询，查询缓存默认一天（`[cache.query_ttl]`）；查询按包名匹配（大小写不敏感），`-A` 不输出描述，所以描述列为空；装进用户自己的 profile，不加 sudo |
 | Nixpkgs | `nix search --json nixpkgs <正则>` | `nix profile list --json` / `nix profile remove` | `nix profile install nixpkgs#名称` | 已安装 Nix 时按需查询，查询缓存默认一天（`[cache.query_ttl]`）；需要 Nix 2.4+ 的新 CLI（flake），DICK 会自己带上 `--extra-experimental-features 'nix-command flakes'`，不必手改 `nix.conf`；属性路径去掉 `legacyPackages.<系统>.` 前缀当名称，精确匹配时优先整名相等（`hello` 不会被 `haskellPackages.hello` 顶掉，只有 `python3Packages.requests` 这类才退到末段匹配）；已安装列表的版本从 store 路径解析（`nix profile list --json` 没有版本字段）；装进用户 profile，不加 sudo |
 
-Pacman/APT/DNF/APK 搜索不执行 `pacman -Ss`、`apt search`、`dnf search` 或 `apk search`。Flatpak 的 OSTree/AppStream 数据需要额外协议和解析依赖，Snap 商店、Linyaps 仓库、Guix 与 Nixpkgs 也没有本原型采用的稳定公开全量索引格式（Linyaps 依赖 `ll-cli` 自己输出 JSON，Guix 用 `guix package -A`，Nixpkgs 用 `nix search --json`），所以按需求允许的例外使用原生命令。Flatpak/Snap/Linyaps 版本过旧、无远端或输出完全无法解析时会报告错误）。
+Pacman/APT/DNF/APK 搜索不执行 `pacman -Ss`、`apt search`、`dnf search` 或 `apk search`。Flatpak 的应用列表来自 `flatpak remote-ls`（`flatpak search` 在部分镜像上会长时间不返回），描述与版本来自远程仓库自己的 AppStream 目录——那是一个压缩过的 XML，标准库就能解，所以不再需要借助 `flatpak` 命令；Snap 商店、Linyaps 仓库、Guix 与 Nixpkgs 也没有本原型采用的稳定公开全量索引格式（Linyaps 依赖 `ll-cli` 自己输出 JSON，Guix 用 `guix package -A`，Nixpkgs 用 `nix search --json`），所以按需求允许的例外使用原生命令。Flatpak/Snap/Linyaps 版本过旧、无远端或输出完全无法解析时会报告错误）。
 
 **请注意：只有pacman、aur、flatpak、linyaps已通过实测！**
 
@@ -111,7 +111,7 @@ Pacman/APT/DNF/APK 搜索不执行 `pacman -Ss`、`apt search`、`dnf search` �
 
 `source enable` / `source disable` 把结果写入配置文件的 `[sources] enabled`，使用外科式编辑，保留其余内容和注释；配置文件或 `[sources]` 段不存在时会创建。禁用后 `search`、`install`、`list`、`update` 都会跳过该来源；显式传入 `--source` 指向已禁用来源会直接报错，并提示运行 `dick source enable`。
 
-`source list` 只读配置，无 `flatpak`、`ll-cli` 或对应原生工具也能运行；`source scan` 才会真正执行原生命令重新探测远端仓库，两者的输出差异就是探测结果。
+`source list` 只读配置，无 `flatpak`、`ll-cli` 或对应原生工具也能运行；`source scan` 才会真正执行原生命令重新探测远端仓库，两者的输出差异就是探测结果。两者都会顺带做一项与仓库无关的检查：Arch 系默认启用 `aur`，而 AUR 自己不会构建包，PATH 里找不到 `paru`/`yay` 时会提示 `没有找到 AUR 助手（paru 或 yay）；装 AUR 包前先装一个，例如：sudo pacman -S paru`（`--json` 下是 `hints` 数组）。
 
 ## 搜索与缓存
 
