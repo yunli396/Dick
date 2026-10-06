@@ -6,6 +6,7 @@ import platform
 import shutil
 import tomllib
 
+from .ai import APIS as AI_APIS
 from .models import DickError
 
 
@@ -131,7 +132,12 @@ class Settings:
         return self.query_ttls.get(source, self.ttl)
 
     def _ai_settings(self, ai):
-        """解析 [ai] 段，环境变量优先于配置文件；未启用或没有密钥时 configured 为假。"""
+        """解析 [ai] 段，环境变量优先于配置文件。
+
+        `configured` 只表示凭据齐全（地址 + 模型 + 密钥），齐全就能测连通、拉模型列表；
+        `enabled` 单独表示「要不要自动翻译包描述」。两者分开，才不会出现「明明填好了
+        却提示去填地址」这种把人带偏的报错。
+        """
         if not isinstance(ai, dict):
             raise DickError("ai 配置必须是表")
         enabled = ai.get("enabled", False)
@@ -143,11 +149,13 @@ class Settings:
         api_key = environment.get("DICK_AI_API_KEY", ai.get("api_key", ""))
         target = environment.get("DICK_AI_TARGET", ai.get("target", "中文"))
         prompt = ai.get("prompt", "")
+        api = environment.get("DICK_AI_API", ai.get("api", ""))
         try:
             timeout = float(ai.get("timeout", 60))
         except (TypeError, ValueError) as error:
             raise DickError(f"ai.timeout 必须是数字：{error}") from error
-        for name, value in (("base_url", base_url), ("model", model), ("target", target), ("prompt", prompt)):
+        for name, value in (("base_url", base_url), ("model", model), ("target", target),
+                            ("prompt", prompt), ("api", api)):
             if not isinstance(value, str):
                 raise DickError(f"ai.{name} 必须为字符串")
         if not base_url.startswith(("http://", "https://")):
@@ -158,11 +166,17 @@ class Settings:
             raise DickError("ai.api_key 必须为字符串")
         if not math.isfinite(timeout) or timeout <= 0:
             raise DickError("ai.timeout 必须大于零")
+        api = api.strip().lower()
+        if not api:  # 老配置没写 api：按地址猜，anthropic 的地址认成 Messages 接口
+            api = "anthropic" if "anthropic" in base_url.lower() else "openai"
+        if api not in AI_APIS:
+            raise DickError("ai.api 只能是 " + "、".join(AI_APIS) + " 之一")
         enabled = enabled or bool(environment.get("DICK_AI_ENABLED") or environment.get("DICK_AI_API_KEY"))
         base_url = base_url.rstrip("/")
-        return {"enabled": enabled, "base_url": base_url, "model": model, "api_key": api_key,
+        return {"enabled": enabled, "api": api, "base_url": base_url, "model": model, "api_key": api_key,
                 "target": target, "timeout": timeout, "prompt": prompt,
-                "configured": bool(enabled and api_key and model and base_url)}
+                "configured": bool(base_url and model.strip() and api_key.strip())}
+
 
     def _web_settings(self, web):
         if not isinstance(web, dict):

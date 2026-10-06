@@ -28,7 +28,7 @@ except ImportError:
     zstd = None
 
 from dick import catalog, selfmanage
-from dick.ai import Translator
+from dick.ai import Translator, endpoint
 from dick.cache import Cache
 from dick.cli import choose_candidates, main
 from dick.config import LAST_SOURCE, PRIORITIES, SOURCES, Settings
@@ -1582,6 +1582,102 @@ class AITests(FixtureTest):
             self.settings_for("[web]\nhost = 1\n")
 
 
+    def test_credentials_are_enough_for_testing_without_enabling(self):
+        """曾经的坑：地址/模型/密钥都填好了，只因没勾「启用 AI 翻译」，
+        测试连接就报「还缺 base_url」——测试连通本来就不该依赖那个开关。"""
+        text = self.AI.replace("enabled = true", "enabled = false")
+        translator = Translator(self.settings_for(text))
+        self.assertTrue(translator.configured)
+        self.assertFalse(translator.describe()["enabled"])
+        payload = {"choices": [{"message": {"content": "快、私密、安全。"}}]}
+        with patch.object(Translator, "_post", return_value=payload) as post:
+            self.assertEqual(translator.test(), "快、私密、安全。")
+            self.assertTrue(post.call_args.args[0].endswith("/v1/chat/completions"))
+        with patch.object(Translator, "_post", return_value=payload):
+            with self.assertRaisesRegex(DickError, "勾选「启用 AI 翻译」"):
+                translator.translate(["hello"])
+        # 有的接口把中文转义成 \uXXXX 再包成 JSON 数组：测试连接要显示成人能读的样子
+        escaped = {"choices": [{"message": {"content": '["\\u5f00\\u6e90"]'}}]}
+        with patch.object(Translator, "_post", return_value=escaped):
+            self.assertEqual(translator.test(), "开源")
+
+    def test_unconfigured_error_names_the_missing_field(self):
+        translator = Translator(self.settings_for('[ai]\nbase_url = "https://api.example.com/v1"\nmodel = "m"\n'))
+        with self.assertRaisesRegex(DickError, "还缺 API Key"):
+            translator.test()
+        with self.assertRaisesRegex(DickError, "还缺 API Key"):
+            translator.translate(["hello"])
+
+    def test_endpoint_completion_rules(self):
+        cases = {
+            ("https://api.deepseek.com", "openai"): "https://api.deepseek.com/v1/chat/completions",
+            ("https://api.deepseek.com/v1/", "openai"): "https://api.deepseek.com/v1/chat/completions",
+            ("https://api.deepseek.com/v1/chat/completions", "openai"):
+                "https://api.deepseek.com/v1/chat/completions",
+            ("https://api.anthropic.com", "anthropic"): "https://api.anthropic.com/v1/messages",
+            ("https://api.anthropic.com/v1/messages", "anthropic"): "https://api.anthropic.com/v1/messages",
+            ("https://api.openai.com/v1", "openai-responses"): "https://api.openai.com/v1/responses",
+            ("https://gw.example.com/openai/v1", "openai"):
+                "https://gw.example.com/openai/v1/chat/completions",
+            ("https://api.moonshot.cn/v1beta", "openai"): "https://api.moonshot.cn/v1beta/chat/completions",
+            ("https://x.example.com/v1?api-version=2024-10-21", "openai"):
+                "https://x.example.com/v1/chat/completions?api-version=2024-10-21",
+            ("", "openai"): "",
+        }
+        for (base, api), expected in cases.items():
+            self.assertEqual(endpoint(base, api), expected, (base, api))
+        translator = Translator(self.settings_for(self.AI))
+        self.assertTrue(translator.describe()["endpoint"].endswith("/v1/chat/completions"))
+        self.assertEqual(translator.describe()["api"], "openai")
+
+    def test_openai_responses_payload_and_shape(self):
+        text = self.AI.replace("[ai]\n", '[ai]\napi = "openai-responses"\n')
+        translator = Translator(self.settings_for(text))
+        self.assertEqual(translator.api, "openai-responses")
+        payload = {"output": [{"type": "reasoning"},
+                              {"type": "message", "content": [{"type": "output_text", "text": '["你好"]'}]}]}
+        with patch.object(Translator, "_post", return_value=payload) as post:
+            self.assertEqual(translator.translate(["hello"]), ["你好"])
+            url, body, headers = post.call_args.args
+        self.assertTrue(url.endswith("/v1/responses"), url)
+        self.assertIn("instructions", body)
+        self.assertIn("input", body)
+        self.assertNotIn("messages", body)  # Responses 接口不吃 chat 的 messages
+        self.assertEqual(headers["Authorization"], "Bearer sk-test")
+
+    def test_model_listing_sorts_and_survives_odd_payloads(self):
+        translator = Translator(self.settings_for(self.AI))
+        payload = {"data": [{"id": "b-model"}, {"id": "a-model"}, {"id": "a-model"}, {"name": "c-model"}]}
+        with patch.object(Translator, "_get", return_value=payload) as get:
+            self.assertEqual(translator.models(), ["a-model", "b-model", "c-model"])
+            url, headers = get.call_args.args
+        self.assertTrue(url.endswith("/v1/models"), url)
+        self.assertEqual(headers["Authorization"], "Bearer sk-test")
+        for payload, message in (({"nope": 1}, "没有返回模型列表"), ({"data": []}, "模型列表是空的")):
+            with patch.object(Translator, "_get", return_value=payload):
+                with self.assertRaisesRegex(DickError, message):
+                    translator.models()
+
+    def test_api_kind_is_validated_and_inferred(self):
+        with self.assertRaisesRegex(DickError, "ai.api"):
+            self.settings_for('[ai]\napi = "grpc"\n')
+        settings = self.settings_for('[ai]\nbase_url = "https://api.anthropic.com/v1"\n')
+        self.assertEqual(settings.ai["api"], "anthropic")  # 老配置没写 api：按地址猜
+        settings = self.settings_for('[ai]\napi = "openai-responses"\nbase_url = "https://x.example.com/v1"\n')
+        self.assertEqual(settings.ai["api"], "openai-responses")
+        settings = self.settings_for('[ai]\nbase_url = "https://x.example.com/v1"\n')
+        self.assertEqual(settings.ai["api"], "openai")
+        self.assertFalse(settings.ai["configured"])  # 默认地址与模型都在，只差密钥
+        self.assertEqual(Translator(settings).missing(), ["API Key"])
+
+    def test_set_ai_persists_the_api_kind(self):
+        path = self.write("etc/dick.toml", "[ai]\napi = \"anthropic\"\nenabled = true\n")
+        settings = Settings(config_path=path, root=self.root, cache_dir=self.root / "cache")
+        state = settings.set_ai({"api": "openai-responses", "base_url": "https://x.example.com"})
+        self.assertEqual(state["api"], "openai-responses")
+        self.assertIn('api = "openai-responses"', path.read_text(encoding="utf-8"))
+
+
 class WebCommandTests(FixtureTest):
     def test_web_command_and_options(self):
         args, remaining = options(["--host", "0.0.0.0", "--port", "3908", "--open", "web"])
@@ -1598,6 +1694,47 @@ class WebCommandTests(FixtureTest):
 
 class WebAppTests(FixtureTest):
     """WebApp 路由的纯函数级测试：不联网、不读取真实系统。"""
+
+    def test_ai_save_accepts_the_api_kind_and_rejects_junk(self):
+        app = self.app()
+        state = app.ai_save({}, {"api": "anthropic", "base_url": "https://api.anthropic.com",
+                                 "model": "claude-x", "api_key": "sk-1"})
+        self.assertEqual(state["api"], "anthropic")
+        self.assertEqual(state["endpoint"], "https://api.anthropic.com/v1/messages")
+        self.assertTrue(state["configured"])
+        self.assertFalse(state["enabled"])  # 配置好了但没启用：翻译时才需要那个开关
+        self.assertTrue(state["has_key"])
+        self.assertNotIn("sk-1", json.dumps(state))
+        with self.assertRaisesRegex(DickError, "api 只能是"):
+            app.ai_save({}, {"api": "soap"})
+
+    def test_ai_models_probes_with_the_unsaved_form_values(self):
+        app = self.app()
+        factory = Mock()
+        factory.return_value.models.return_value = ["m1", "m2"]
+        with patch("dick.web.Translator", factory):
+            payload = app.ai_models({}, {"api": "openai-responses", "base_url": "https://x.example.com/v1",
+                                         "api_key": "sk-form"})
+        self.assertEqual(payload["models"], ["m1", "m2"])
+        self.assertEqual(payload["endpoint"], "https://x.example.com/v1/responses")
+        probe = factory.call_args.args[0]
+        self.assertEqual(probe.ai["api"], "openai-responses")
+        self.assertEqual(probe.ai["api_key"], "sk-form")
+        self.assertEqual(probe.ai["model"], app.settings.ai["model"])  # 表单没填的沿用已保存值
+
+    def test_ai_models_keeps_the_saved_key_and_checks_the_api(self):
+        app = self.app()
+        with self.assertRaisesRegex(DickError, "api 只能是"):
+            app.ai_models({}, {"api": "soap"})
+        app.settings.ai = dict(app.settings.ai, api_key="sk-saved")
+        factory = Mock()
+        factory.return_value.models.return_value = ["m"]
+        with patch("dick.web.Translator", factory):
+            app.ai_models({}, {"api_key": "   "})
+        probe = factory.call_args.args[0]
+        self.assertEqual(probe.ai["api_key"], "sk-saved")  # 留空表示不改动密钥
+        self.assertEqual(probe.ai["model"], app.settings.ai["model"])  # 模型不在覆盖之列
+
 
     REPOSITORIES = [Repository("pacman", "core", ("https://mirror.example/core.db",))]
 
@@ -2169,6 +2306,21 @@ class WebHttpTests(FixtureTest):
                       b" border-bottom: 1px solid var(--line); min-width: 0; }", styles)
         self.assertIn(b".nav { flex-direction: row; gap: 6px; overflow-x: auto;"
                       b" padding-bottom: 2px; scrollbar-width: none; }", styles)
+
+    def test_static_assets_keep_the_ai_interface_controls(self):
+        """接口类型、模型候选、地址补全提示都得在，并且只走 textContent。"""
+        _, _, page = self.request("/")
+        for marker in (b'id="aiApi"', b'id="aiModels"', b'id="aiModelList"', b'id="aiEndpointHint"'):
+            self.assertIn(marker, page)
+        self.assertIn(b'value="openai-responses"', page)
+        self.assertIn(b'value="anthropic"', page)
+        _, _, script = self.request("/assets/app.js")
+        for marker in (b"function aiEndpoint(", b"function updateAiHint(", b"function fetchModels(",
+                       b"function paintAiState("):
+            self.assertIn(marker, script)
+        self.assertIn(b"'/api/ai/models'", script)
+        self.assertIn(b"list.replaceChildren(...data.models.map((name) => el('option', { value: name })))",
+                      script)
 
     def test_unknown_routes_return_404(self):
         status, _, body = self.request("/api/nope")

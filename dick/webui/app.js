@@ -533,15 +533,15 @@ async function loadStatus() {
   }
 
   const ai = status.ai;
+  $('#aiApi').value = ai.api || 'openai';
   $('#aiBaseUrl').value = ai.base_url || '';
   $('#aiModel').value = ai.model || '';
   $('#aiTarget').value = ai.target || '';
   $('#aiTimeout').value = ai.timeout || 60;
   $('#aiPrompt').value = ai.prompt || '';
   $('#aiEnabled').checked = Boolean(ai.enabled);
-  $('#aiState').textContent = ai.configured
-    ? `已配置：${ai.model} · ${ai.base_url} · 目标语言 ${ai.target}`
-    : '尚未配置（填写接口地址、模型与 API Key 后即可翻译包描述）。';
+  paintAiState(ai);
+  updateAiHint();
 
   state.boot = status.boot;
   const self = status.self || {};
@@ -594,9 +594,61 @@ async function waitForRestart(previous, tries = 40) {
   return false;
 }
 
+/* ------------------------------------------------------------------ AI 翻译 */
+
+// 后端会按接口类型把地址补全（dick/ai.py:endpoint），这里放一份等价的前端版本，
+// 目的是让用户在输入框里就能看见「最终会请求哪个地址」，而不是保存后才发现拼错了。
+const AI_OPERATIONS = { openai: 'chat/completions', 'openai-responses': 'responses', anthropic: 'messages' };
+
+function aiEndpoint(baseUrl, api) {
+  const base = (baseUrl || '').trim().replace(/\/+$/, '');
+  if (!base) return '';
+  const operation = AI_OPERATIONS[api] || AI_OPERATIONS.openai;
+  let url;
+  try {
+    url = new URL(base);
+  } catch (error) {
+    return `${base}/${operation}`;  // 地址还不完整，先给个能看懂的拼接结果
+  }
+  const path = url.pathname.replace(/\/+$/, '');
+  if (/(chat\/completions|responses|messages)$/.test(path)) return base;
+  const segments = path.split('/').filter(Boolean);
+  const versioned = segments.some((segment) => /^v\d+[A-Za-z0-9._-]*$/.test(segment));
+  url.pathname = `${path}${versioned ? '' : '/v1'}/${operation}`;
+  return url.toString();
+}
+
+function updateAiHint() {
+  const endpoint = aiEndpoint($('#aiBaseUrl').value, $('#aiApi').value);
+  $('#aiEndpointHint').textContent = endpoint
+    ? `将请求：${endpoint}（只填到域名或 /v1 都会自动补全，完整地址原样使用）`
+    : '填写接口地址后，这里会显示最终请求的完整地址。';
+}
+
+function paintAiState(ai = state.ai || {}) {
+  if (!ai.configured) {
+    const missing = [];
+    if (!(ai.base_url || '').trim()) missing.push('接口地址');
+    if (!(ai.model || '').trim()) missing.push('模型');
+    if (!ai.has_key) missing.push('API Key');
+    $('#aiState').textContent = missing.length
+      ? `还不能用：缺 ${missing.join('、')}（填好保存后即可测试连接）。`
+      : '还不能用：请填写接口地址、模型与 API Key 后保存。';
+    return;
+  }
+  const label = ai.api_label || ai.api || '';
+  if (!ai.enabled) {
+    $('#aiState').textContent = `接口已配置：${label} · ${ai.model} · 请求 ${ai.endpoint}。`
+      + '「启用 AI 翻译」还没勾选，勾上保存后搜索页才会自动翻译描述。';
+    return;
+  }
+  $('#aiState').textContent = `已启用：${label} · ${ai.model} · 目标语言 ${ai.target} · 请求 ${ai.endpoint}`;
+}
+
 async function saveAi() {
   const body = {
     enabled: $('#aiEnabled').checked,
+    api: $('#aiApi').value,
     base_url: $('#aiBaseUrl').value.trim(),
     model: $('#aiModel').value.trim(),
     api_key: $('#aiKey').value,
@@ -607,12 +659,37 @@ async function saveAi() {
   try {
     state.ai = await api('/api/ai', { method: 'POST', body });
     $('#aiKey').value = '';
-    $('#aiState').textContent = state.ai.configured
-      ? `已配置：${state.ai.model} · ${state.ai.base_url} · 目标语言 ${state.ai.target}`
-      : '尚未配置（填写接口地址、模型与 API Key 后即可翻译包描述）。';
+    paintAiState(state.ai);
+    updateAiHint();
     toast('AI 设置已保存');
   } catch (error) {
     toast(error.message, 'err');
+  }
+}
+
+async function fetchModels() {
+  const button = $('#aiModels');
+  button.disabled = true;
+  button.textContent = '获取中…';
+  try {
+    const data = await api('/api/ai/models', {
+      method: 'POST',
+      body: {
+        api: $('#aiApi').value,
+        base_url: $('#aiBaseUrl').value.trim(),
+        api_key: $('#aiKey').value,
+      },
+    });
+    const list = $('#aiModelList');
+    list.replaceChildren(...data.models.map((name) => el('option', { value: name })));
+    const current = $('#aiModel').value.trim();
+    if (!current || !data.models.includes(current)) $('#aiModel').value = data.models[0];
+    toast(`获取到 ${data.models.length} 个模型（${data.endpoint}）`);
+  } catch (error) {
+    toast(`获取模型失败：${error.message}`, 'err');
+  } finally {
+    button.disabled = false;
+    button.textContent = '获取模型列表';
   }
 }
 
@@ -726,7 +803,7 @@ async function translateVisible() {
     toast(`AI 翻译失败：${error.message}`, 'err');
     state.translateOn = false;
     $('#translateToggle').checked = false;
-    $('#searchMeta').textContent = 'AI 翻译不可用，请到设置里配置接口。';
+    $('#searchMeta').textContent = `AI 翻译未生效：${error.message}`;
   }
 }
 
@@ -1287,6 +1364,9 @@ function bindEvents() {
   $('#selfRestart').addEventListener('click', restartServer);
   $('#aiSave').addEventListener('click', saveAi);
   $('#aiTest').addEventListener('click', testAi);
+  $('#aiModels').addEventListener('click', fetchModels);
+  $('#aiApi').addEventListener('change', updateAiHint);
+  $('#aiBaseUrl').addEventListener('input', updateAiHint);
   $('#tokenForm').addEventListener('submit', (event) => {
     event.preventDefault();
     submitToken($('#tokenInput').value);
@@ -1351,9 +1431,14 @@ async function init() {
 async function bootstrap() {
   try {
     await Promise.all([loadStatus(), loadSources(false)]);
-    if (state.status && state.status.ai && state.status.ai.configured) {
-      $('#translateToggle').checked = false;
-    }
+    const ai = (state.status && state.status.ai) || {};
+    // 工具栏的「AI 翻译」是本次会话的开关：默认跟随设置页里的「启用 AI 翻译」，
+    // 凭据不全时直接禁用，避免点了之后只收到一句报错。
+    const toggle = $('#translateToggle');
+    toggle.disabled = !ai.configured;
+    toggle.title = ai.configured ? '' : '先在设置页配好 AI 接口';
+    toggle.checked = Boolean(ai.configured && ai.enabled);
+    state.translateOn = toggle.checked;
   } catch (error) {
     if ($('#tokenGate').hidden) toast(`无法读取状态：${error.message}`, 'err');
   }

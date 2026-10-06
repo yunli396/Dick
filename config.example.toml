@@ -52,11 +52,15 @@ port = 3907
 # token = ""
 
 # 可选：网页里的 AI 翻译（设置页保存后会写回这一段）。
-# 兼容 OpenAI 的 /chat/completions 与 Anthropic 的 /messages；
-# DICK_AI_API_KEY、DICK_AI_BASE_URL、DICK_AI_MODEL、DICK_AI_TARGET 等环境变量优先。
+# api 三选一：openai = OpenAI 兼容的 /chat/completions（DeepSeek、Moonshot、Ollama、
+# 多数中转网关），openai-responses = OpenAI 的 Responses 接口，anthropic = Claude 的
+# Messages 接口；留空会按 base_url 猜（含 anthropic 就是 anthropic，否则 openai）。
+# base_url 不用写全：DICK 会补上 /v1/chat/completions 这类后缀。
+# DICK_AI_BASE_URL、DICK_AI_MODEL、DICK_AI_API_KEY、DICK_AI_API、DICK_AI_TARGET 优先于这里。
 [ai]
 enabled = false
-base_url = "https://api.deepseek.com/v1"
+api = "openai"
+base_url = "https://api.deepseek.com"
 model = "deepseek-chat"
 api_key = ""
 target = "中文"

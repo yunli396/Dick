@@ -33,7 +33,8 @@ from urllib.parse import parse_qs, quote, urlparse
 from datetime import date
 
 from . import __version__, catalog, selfmanage
-from .ai import Translator
+from .ai import APIS as AI_APIS, Translator
+from .ai import endpoint as ai_endpoint
 from .cache import Cache
 from .config import SOURCES, Settings
 from .discovery import discover
@@ -332,6 +333,7 @@ class WebApp:
             ("GET", "/api/ai"): self.ai_status,
             ("POST", "/api/ai"): self.ai_save,
             ("POST", "/api/ai/test"): self.ai_test,
+            ("POST", "/api/ai/models"): self.ai_models,
             ("POST", "/api/translate"): self.translate,
         }
 
@@ -917,7 +919,7 @@ class WebApp:
         return self.translator.describe()
 
     def ai_save(self, query, body):
-        allowed = {"enabled", "base_url", "model", "api_key", "target", "prompt", "timeout"}
+        allowed = {"enabled", "api", "base_url", "model", "api_key", "target", "prompt", "timeout"}
         values = {}
         for key, value in body.items():
             if key not in allowed:
@@ -925,6 +927,10 @@ class WebApp:
             if key == "enabled":
                 if not isinstance(value, bool):
                     raise DickError("enabled 必须是布尔值")
+                values[key] = value
+            elif key == "api":
+                if not isinstance(value, str) or value not in AI_APIS:
+                    raise DickError("api 只能是 " + "、".join(AI_APIS) + " 之一")
                 values[key] = value
             elif key == "timeout":
                 try:
@@ -951,6 +957,25 @@ class WebApp:
         if not isinstance(text, str):
             raise DickError("text 必须是字符串")
         return {"translation": self.translator.test(text), "target": self.translator.target()}
+
+    def ai_models(self, query, body):
+        """按当前（或表单里临时填的）地址拉一份模型列表，方便设置页直接挑。"""
+        ai = dict(self.settings.ai)
+        for key in ("base_url", "api", "api_key"):
+            value = body.get(key)
+            if not isinstance(value, str):
+                continue
+            if key == "api":
+                value = value.strip().lower()
+                if value not in AI_APIS:
+                    raise DickError("api 只能是 " + "、".join(AI_APIS) + " 之一")
+            if key == "api_key" and not value.strip():
+                continue  # 留空表示用已保存的密钥
+            ai[key] = value.strip() if key != "api_key" else value
+        probe = SimpleNamespace(ai=ai, cache_dir=self.settings.cache_dir)
+        translator = Translator(probe)
+        return {"models": translator.models(), "endpoint": ai_endpoint(ai.get("base_url", ""),
+                                                                      ai.get("api") or "openai")}
 
     def translate(self, query, body):
         texts = body.get("texts")

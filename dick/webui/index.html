@@ -162,8 +162,16 @@
           <h2>AI 翻译</h2>
           <p class="muted" id="aiState">未配置。</p>
           <div class="form-grid">
-            <label>接口地址<input class="input" id="aiBaseUrl" placeholder="https://api.deepseek.com/v1"></label>
-            <label>模型<input class="input" id="aiModel" placeholder="deepseek-chat"></label>
+            <label>接口类型
+              <select class="input" id="aiApi">
+                <option value="openai">OpenAI 兼容（chat/completions）</option>
+                <option value="openai-responses">OpenAI Responses（responses）</option>
+                <option value="anthropic">Anthropic Messages（messages）</option>
+              </select>
+            </label>
+            <label>接口地址<input class="input" id="aiBaseUrl" placeholder="https://api.deepseek.com"></label>
+            <label>模型<input class="input" id="aiModel" list="aiModelList" placeholder="deepseek-chat">
+              <datalist id="aiModelList"></datalist></label>
             <label>API Key<input class="input" id="aiKey" type="password" placeholder="留空表示不修改已保存的密钥"></label>
             <label>目标语言<input class="input" id="aiTarget" placeholder="中文"></label>
             <label>超时（秒）<input class="input" id="aiTimeout" type="number" min="1" step="1"></label>
@@ -173,7 +181,9 @@
             <label class="span-2">自定义提示词<textarea class="input" id="aiPrompt" rows="3"
               placeholder="留空则使用内置提示词"></textarea></label>
           </div>
+          <p class="muted small" id="aiEndpointHint"></p>
           <div class="btn-row">
+            <button class="btn" id="aiModels">获取模型列表</button>
             <button class="btn" id="aiTest">测试连接</button>
             <button class="btn btn-primary" id="aiSave">保存</button>
           </div>

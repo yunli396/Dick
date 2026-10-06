@@ -190,6 +190,22 @@ Flatpak 优先匹配完整应用 ID，也支持唯一的 ID 末段别名：`fire
 - **更新 DICK**：和命令行的 `dick updateme` 走同一条路——install.sh 装法会 git 拉取并重装进 venv，源码工作区就是 `git pull --ff-only`；系统包管理器装的 DICK 会提示改用对应管理器升级，按钮直接置灰。任务面板实时回灌 git / pip 的输出，更新完提醒你重启才生效。
 - **重启服务**：原地重启当前进程（`os.execv` 换掉自己的镜像，PID 不变），用来让新代码生效——Python 代码只在启动时加载，静态资源是 `no-store`、刷新页面即可。服务会先把响应写完再重启，页面随后按「启动编号」轮询，确认换了进程才提示成功；这几秒内页面会短暂断开，然后自动恢复，正在跑的任务会中断。
 
+## AI 翻译
+
+「设置」页可以接一个 AI 接口，把索引里的英文包描述翻成目标语言（只翻描述文本，不动包名、版本和命令）。三种接口形态都支持，DICK 按形态拼出正确地址：
+
+| 接口类型 | 典型用途 | 实际请求的地址 |
+| --- | --- | --- |
+| `openai`（OpenAI 兼容） | DeepSeek、Moonshot、Ollama、大多数中转网关 | `<地址>/v1/chat/completions` |
+| `openai-responses` | OpenAI 新的 Responses 接口 | `<地址>/v1/responses` |
+| `anthropic` | Claude 的 Messages 接口 | `<地址>/v1/messages` |
+
+- **地址不用写全**：填 `https://api.deepseek.com` 就够，DICK 会补上 `/v1/chat/completions`；写到 `/v1`、`/v1/`、`/v1/chat/completions`，或带查询参数（如 `?api-version=2024-10-21`）都不会重复拼接。设置页在地址框下面实时显示最终会请求的完整地址。
+- **模型名可以自动拉取**：填好地址与 API Key 后点「获取模型列表」，DICK 请求版本根下的 `/models`（`/v1/chat/completions` → `/v1/models`）并把结果填进候选列表；接口不支持列模型时会明说，手填模型名即可。
+- **「填好了」与「启用了」是两件事**：只要地址、模型、密钥齐全，配置就是完整的——「测试连接」和「获取模型列表」都不需要先启用。`enabled` 只决定**搜索时要不要自动翻译描述**；没勾选时手动翻译会提示去勾选「启用 AI 翻译」，而不是说配置缺失。命令行/配置文件里没有 `enabled` 的老配置同样能测试连通。
+- **凭据可以放在环境变量里**：`DICK_AI_BASE_URL`、`DICK_AI_MODEL`、`DICK_AI_API_KEY`、`DICK_AI_API`、`DICK_AI_TARGET` 优先于配置文件；`api` 留空时按地址猜（含 `anthropic` 就用 Messages 形态）。
+- 翻译结果按「原文 + 目标语言」缓存在缓存目录，同一段描述只翻一次；AI 不可用时搜索照常工作，只是描述保持原文。
+
 ## 许可证
 
 MIT，见 [LICENSE](LICENSE)。
