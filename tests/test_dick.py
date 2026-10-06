@@ -38,7 +38,8 @@ from dick.install import Installer
 from dick.local import FILE_LISTS, LIST_COMMANDS, PARSERS, matches, rank, read_installed
 from dick.models import DickError, LocalPackage, Package, Repository
 from dick.network import HTTPClient, decompress
-from dick.parsers import apk_packages, apt_packages, dnf_packages, pacman_packages, strip_nix_attribute
+from dick.parsers import (NIX_FLAKE_FLAGS, apk_packages, apt_packages, dnf_packages,
+                          pacman_packages, strip_nix_attribute)
 from dick.progress import Progress
 from dick.security import (certificate_names, ensure_certificate, interface_addresses, resolve_token,
                            ssl_context, token_path)
@@ -593,7 +594,8 @@ class IndexTests(FixtureTest):
         self.assertEqual([(package.name, package.version, package.description) for package in packages],
                          [("firefox", "128.0", "Web browser"), ("python3Packages.requests", "2.32.3", "")])
         self.assertTrue(all(package.source == "nixpkgs" for package in packages))
-        output.assert_called_once_with(["nix", "search", "--json", "nixpkgs", "firefox"], timeout=300)
+        output.assert_called_once_with(
+            ["nix", *NIX_FLAKE_FLAGS, "search", "--json", "nixpkgs", "firefox"], timeout=300)
 
     def test_guix_and_nixpkgs_expressions_are_escaped(self):
         """`+`/`(` 这类元字符在 guix 的 POSIX 正则和 nix 的 std::regex 里都是语法，必须当字面量。"""
@@ -603,6 +605,36 @@ class IndexTests(FixtureTest):
             index.search("g++", ["nixpkgs"])
         self.assertEqual([call.args[0][-1] for call in output.call_args_list], ["g\\+\\+", "g\\+\\+"])
 
+    def test_nix_experimental_flags_are_passed_on_the_command_line(self):
+        """nix search / nix profile 都是实验性命令：DICK 自己带上开关，用户不必先改 nix.conf。"""
+        self.assertEqual(NIX_FLAKE_FLAGS, ("--extra-experimental-features", "nix-command flakes"))
+
+    def test_nixpkgs_exact_lookup_prefers_the_bare_attribute(self):
+        """nix 搜索按属性路径的末段匹配，`dick install hello` 不能把 haskellPackages.hello 一起算进来，
+        否则安装阶段会以「名称匹配多个应用」拒绝，连 hello 这种基础包都装不上。"""
+        payload = json.dumps({
+            "legacyPackages.x86_64-linux.hello": {"version": "2.12.3", "description": "GNU Hello"},
+            "legacyPackages.x86_64-linux.haskellPackages.hello": {"version": "1.0.0.2"},
+            "legacyPackages.x86_64-linux.vdrPlugins.hello": {"version": "0.1"},
+        })
+        index = self.index([Repository("nixpkgs", "nixpkgs", ())])
+        with patch("dick.index.native_output", return_value=payload):
+            packages, errors = index.search("hello", ["nixpkgs"], exact=True)
+        self.assertFalse(errors)
+        self.assertEqual([package.name for package in packages], ["hello"])
+
+    def test_nixpkgs_exact_lookup_falls_back_to_nested_names(self):
+        """整名不存在时保留末段匹配：只有 python3Packages.requests 时 `requests` 仍应能装。"""
+        payload = json.dumps({
+            "legacyPackages.x86_64-linux.python3Packages.requests": {"version": "2.32.3"},
+            "legacyPackages.x86_64-linux.python311Packages.requests": {"version": "2.32.3"},
+        })
+        index = self.index([Repository("nixpkgs", "nixpkgs", ())])
+        with patch("dick.index.native_output", return_value=payload):
+            packages, errors = index.search("requests", ["nixpkgs"], exact=True)
+        self.assertFalse(errors)
+        self.assertEqual(sorted(package.name for package in packages),
+                         ["python311Packages.requests", "python3Packages.requests"])
 
     def test_query_cache_ttl_is_per_source(self):
         """按需来源各用各的缓存有效期：guix 一天，aur 等仍跟全局 ttl 走。"""
@@ -789,7 +821,8 @@ class LocalTests(unittest.TestCase):
 
     def test_guix_and_nixpkgs_installed_lists(self):
         self.assertEqual(LIST_COMMANDS["guix"], ["guix", "package", "--list-installed"])
-        self.assertEqual(LIST_COMMANDS["nixpkgs"], ["nix", "profile", "list", "--json"])
+        self.assertEqual(LIST_COMMANDS["nixpkgs"],
+                         ["nix", *NIX_FLAKE_FLAGS, "profile", "list", "--json"])
         self.assertEqual([(package.name, package.version) for package in PARSERS["guix"](
             "firefox  128.0  out  gnu/packages/gnuzilla.scm:123:2\n")], [("firefox", "128.0")])
         with self.assertRaisesRegex(DickError, "四列表格"):
@@ -805,6 +838,25 @@ class LocalTests(unittest.TestCase):
         for broken in ("not json", json.dumps([1])):
             with self.subTest(broken=broken), self.assertRaises(DickError):
                 PARSERS["nixpkgs"](broken)
+
+    def test_nixpkgs_installed_list_reads_versions_from_store_paths(self):
+        """nix 2.35 的真实形状：elements 以元素名为键、记录里没有 version，
+        自己装自己那个 `nix` 元素甚至没有 attrPath——名字要退到字典键，版本只能从 store path 解析。"""
+        payload = json.dumps({
+            "elements": {
+                "hello": {"active": True, "attrPath": "legacyPackages.x86_64-linux.hello",
+                          "priority": 5,
+                          "storePaths": ["/nix/store/5z2yp3ysx8476c8g5w25b0smlgkjvaq3-hello-2.12.3"]},
+                "nix": {"active": True, "priority": 5,
+                        "storePaths": ["/nix/store/irfrbndi76zhkvqsfhmsn4a99iafck29-nix-2.35.2"]},
+                "python3Packages.requests": {"storePaths": [
+                    "/nix/store/q0lbdx5yv93a3md74kjhm0v2kljjii89-python3-requests-2.32.3"]},
+            },
+            "version": 3,
+        })
+        self.assertEqual([(package.name, package.version) for package in PARSERS["nixpkgs"](payload)],
+                         [("hello", "2.12.3"), ("nix", "2.35.2"),
+                          ("python3Packages.requests", "2.32.3")])
 
     def test_matching_prefers_exact_names_and_id_segments(self):
         exact = LocalPackage("pacman", "firefox")
@@ -1037,13 +1089,14 @@ class InstallationTests(FixtureTest):
         self.assertEqual(installer.install_command(Package("firefox", "guix")),
                          ["guix", "install", "firefox"])
         self.assertEqual(installer.install_command(Package("python3Packages.requests", "nixpkgs")),
-                         ["nix", "profile", "install", "nixpkgs#python3Packages.requests"])
+                         ["nix", *NIX_FLAKE_FLAGS, "profile", "install",
+                          "nixpkgs#python3Packages.requests"])
         self.assertEqual(installer.uninstall_command(Package("firefox", "apk")),
                          ["apk", "del", "firefox"])
         self.assertEqual(installer.uninstall_command(Package("firefox", "guix")),
                          ["guix", "remove", "firefox"])
         self.assertEqual(installer.uninstall_command(Package("firefox", "nixpkgs")),
-                         ["nix", "profile", "remove", "firefox"])
+                         ["nix", *NIX_FLAKE_FLAGS, "profile", "remove", "firefox"])
 
     def test_apk_is_privileged_and_alpine_upgrades_through_it(self):
         self.settings.family = "alpine"
@@ -2653,6 +2706,64 @@ class PasswordPrivilegeTests(FixtureTest):
         self.assertEqual(calls, [command, ["sudo", "pacman", "-Sy"], command])
         self.assertEqual(installer.refresh_command.call_count, 1)
         self.assertIn("「更新与升级」", "\n".join(lines))
+
+    def test_missing_native_metadata_refreshes_and_retries_once(self):
+        """apt 的包列表从没同步过时只会说 Unable to locate package，也该刷新一次再重试。"""
+        settings = Mock()
+        settings.priority = ["apt"]
+        settings.available = lambda source: True
+        lines = []
+        installer = Installer(settings, Mock(), lines.append, dry_run=False, yes=True)
+        installer.index.search = Mock(return_value=([Package("hello", "apt")], []))
+        command = ["sudo", "apt-get", "install", "-y", "--", "hello"]
+        refresh = ["sudo", "apt-get", "update"]
+        installer.install_command = Mock(return_value=command)
+        installer.refresh_command = Mock(return_value=refresh)
+        calls = []
+
+        def execute(entry):
+            calls.append(entry)
+            if entry == refresh:
+                installer.last_output = []
+                return 0
+            if calls.count(command) == 1:
+                installer.last_output = ["E: Unable to locate package hello"]
+                return 100
+            installer.last_output = []
+            return 0
+
+        installer.execute = execute
+        result = installer.install("hello", ["apt"])
+        self.assertTrue(result["success"])
+        self.assertEqual(calls, [command, refresh, command])
+        self.assertTrue(result["attempts"][-1]["refreshed"])
+        self.assertIn("先同步一次本地元数据再重试", "\n".join(lines))
+        self.assertNotIn("先刷新索引再重试一次", "\n".join(lines))
+
+    def test_missing_package_without_a_refresh_command_gets_a_hint(self):
+        """dnf 自己会刷元数据、也没有本地刷新命令：找不到就直说，别重复跑安装。"""
+        settings = Mock()
+        settings.priority = ["dnf"]
+        settings.available = lambda source: True
+        lines = []
+        installer = Installer(settings, Mock(), lines.append, dry_run=False, yes=True)
+        installer.index.search = Mock(return_value=([Package("hello", "dnf")], []))
+        command = ["sudo", "dnf", "install", "-y", "--", "hello"]
+        installer.install_command = Mock(return_value=command)
+        installer.refresh_command = Mock(return_value=None)
+        calls = []
+
+        def execute(entry):
+            calls.append(entry)
+            installer.last_output = ["Error: Unable to find a match: hello"]
+            return 1
+
+        installer.execute = execute
+        result = installer.install("hello", ["dnf"])
+        self.assertFalse(result["success"])
+        self.assertEqual(calls, [command])
+        installer.refresh_command.assert_called_once_with("dnf")
+        self.assertIn("认不出这个包", "\n".join(lines))
 
     def test_action_hides_the_password_and_rate_limits_guesses(self):
         path = self.write("etc/dick.toml", "")

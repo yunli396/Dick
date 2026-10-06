@@ -7,8 +7,8 @@ import xml.etree.ElementTree as ET
 
 from .discovery import english_locale, native_output
 from .models import DickError, Package
-from .parsers import (apk_packages, apt_packages, dnf_packages, pacman_packages,
-                      strip_nix_attribute)
+from .parsers import (NIX_FLAKE_FLAGS, apk_packages, apt_packages, dnf_packages,
+                      pacman_packages, strip_nix_attribute)
 
 
 # Sources without a stable public index: queried on demand and kept in the TTL query cache.
@@ -302,7 +302,8 @@ class Index:
         if cached is not None:
             return cached
         try:
-            output = native_output(["nix", "search", "--json", "nixpkgs", literal_regexp(query)],
+            output = native_output(["nix", *NIX_FLAKE_FLAGS, "search", "--json", "nixpkgs",
+                                    literal_regexp(query)],
                                    timeout=max(300, int(self.settings.timeout) * 10))
         except DickError as error:
             if "experimental" in str(error).lower():
@@ -324,13 +325,17 @@ class Index:
             name = strip_nix_attribute(attribute)
             if not name:
                 continue
-            if exact and not (name.casefold() == lowered
-                              or name.rsplit(".", 1)[-1].casefold() == lowered):
-                continue
             fields = record if isinstance(record, dict) else {}
             version = fields.get("version") if isinstance(fields.get("version"), str) else ""
             description = fields.get("description") if isinstance(fields.get("description"), str) else ""
             packages.append(Package(name, "nixpkgs", description, version, "nixpkgs"))
+        if exact:
+            # 先要「整名相等」，没有再退到「叶子名相等」。nix 的搜索是按属性路径的末段匹配的，
+            # 直接要求装 hello 会同时命中 hello、haskellPackages.hello、vdrPlugins.hello……
+            # 安装阶段就会以「名称匹配多个应用」拒绝；优先整名相等才能让 `dick install hello` 装成。
+            exact_match = [package for package in packages if package.name.casefold() == lowered]
+            packages = exact_match or [package for package in packages
+                                       if package.name.rsplit(".", 1)[-1].casefold() == lowered]
         self.cache.query_put("nixpkgs", key, packages)
         return packages
 

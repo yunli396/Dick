@@ -18,6 +18,11 @@ def strip_nix_attribute(attribute):
     return ".".join(parts)
 
 
+# `nix search` 与 `nix profile` 都是实验性命令。带上这两个全局开关（必须写在子命令之前），
+# 用户不用先改 nix.conf 就能用；开关只是本次调用生效，不落盘。
+NIX_FLAKE_FLAGS = ("--extra-experimental-features", "nix-command flakes")
+
+
 def control_records(text):
     record = {}
     field = None

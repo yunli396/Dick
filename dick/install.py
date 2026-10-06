@@ -6,6 +6,7 @@ import subprocess
 import sys
 
 from .models import DickError
+from .parsers import NIX_FLAKE_FLAGS
 
 # 原生包管理器的索引过期时，本地记的版本号在镜像上已经不存在——下载会 404（pacman 报
 # 「无法从 … 获取文件」/「无法提交处理」，apt 报 Hash Sum mismatch / 404）。这里给出
@@ -19,6 +20,16 @@ REFRESH_COMMANDS = {
 STALE_INDEX = re.compile(
     r"无法获取|无法下载|无法从|下载失败|无法提交|Failed to retrieve|Failed to fetch|"
     r"Cannot retrieve|Hash Sum mismatch|校验和不匹配|returned error: 404|404\s+Not Found",
+    re.IGNORECASE,
+)
+
+# 另一种「本地元数据没跟上」：DICK 自己的索引是刚从网上拉下来的，原生包管理器却不认识这个包。
+# 容器与刚装好的系统里很常见——apt 的包列表从没同步过，`apt-get install` 只会说
+# 「Unable to locate package」，而 pacman/apk 各有各的说法。刷新一次本地元数据再来一遍就好。
+MISSING_LOCALLY = re.compile(
+    r"Unable to locate package|Unable to locate|No match for argument|Unable to find a match|"
+    r"unable to select packages|no such package|没有匹配|找不到目标|target not found|"
+    r"没有找到包|does not provide|is not available",
     re.IGNORECASE,
 )
 
@@ -87,6 +98,9 @@ class Installer:
 
     def looks_like_stale_index(self):
         return bool(self.last_output) and bool(STALE_INDEX.search("\n".join(self.last_output)))
+
+    def looks_like_missing_locally(self):
+        return bool(self.last_output) and bool(MISSING_LOCALLY.search("\n".join(self.last_output)))
 
     def looks_like_not_authorized(self):
         return bool(self.last_output) and bool(NOT_AUTHORIZED.search("\n".join(self.last_output)))
@@ -249,7 +263,7 @@ class Installer:
             # guix 装进用户自己的 profile，不需要 root。
             return ["guix", "install", name]
         if source == "nixpkgs":
-            return ["nix", "profile", "install", f"nixpkgs#{name}"]
+            return ["nix", *NIX_FLAKE_FLAGS, "profile", "install", f"nixpkgs#{name}"]
         raise DickError(f"不支持安装来源：{source}")
 
     def install(self, target, sources):
@@ -271,19 +285,27 @@ class Installer:
                 command = self.install_command(packages[0])
                 code = self.execute(command)
                 stale = self.looks_like_stale_index()
+                missing = self.looks_like_missing_locally()
                 attempts.append({"source": source, "command": command, "returncode": code})
-                if code != 0 and stale and source not in refreshed:
-                    # 本地索引过期：镜像上已经换了新版本，本地记的旧文件名一律 404。
-                    # 先刷新一次索引再重试同一个命令，省得用户自己开终端跑 pacman -Sy。
+                if code != 0 and (stale or missing) and source not in refreshed:
+                    # 两种「本地元数据没跟上」都先刷新一次再重试同一个命令：
+                    # 一是索引过期（镜像上换了新版本，本地记的旧文件名一律 404）；
+                    # 二是原生包列表从没同步过——DICK 的索引是刚下载的，搜索看得到包，
+                    # apt-get 却只会说「Unable to locate package」。
                     refresh = self.refresh_command(source)
                     if refresh:
                         refreshed.add(source)
-                        self.report(f"{source} 的本地索引可能已过期（镜像上找不到这个版本），"
-                                    "先刷新索引再重试一次。")
+                        if stale:
+                            self.report(f"{source} 的本地索引可能已过期（镜像上找不到这个版本），"
+                                        "先刷新索引再重试一次。")
+                        else:
+                            self.report(f"{source} 本地的包列表里还没有这个包，"
+                                        "先同步一次本地元数据再重试。")
                         refresh_code = self.execute(refresh)
                         if refresh_code == 0:
                             code = self.execute(command)
                             stale = self.looks_like_stale_index()
+                            missing = self.looks_like_missing_locally()
                             attempts.append({"source": source, "command": command,
                                              "returncode": code, "refreshed": True})
                         else:
@@ -301,6 +323,9 @@ class Installer:
                 if stale:
                     self.report("本地索引里记的版本在镜像上已经不存在了："
                                 "在「更新与升级」里做一次完整升级后再装会更稳。")
+                elif missing:
+                    self.report(f"{source} 认不出这个包：它可能不在已启用的仓库（组件）里，"
+                                "也可能本地包列表还没同步。")
                 if source == "linyaps" and self.looks_like_not_authorized():
                     self.report("玲珑的服务要求管理员认证（polkit），这次调用没通过授权。"
                                 "可以在宿主终端里先执行一次："
@@ -345,7 +370,7 @@ class Installer:
         if source == "guix":
             return ["guix", "remove", name]
         if source == "nixpkgs":
-            return ["nix", "profile", "remove", name]
+            return ["nix", *NIX_FLAKE_FLAGS, "profile", "remove", name]
         raise DickError(f"不支持卸载来源：{source}")
 
     def native_source(self, sources=None):

@@ -9,7 +9,7 @@ import json
 
 from .discovery import native_output, rooted
 from .models import DickError, LocalPackage
-from .parsers import control_records, strip_nix_attribute
+from .parsers import NIX_FLAKE_FLAGS, control_records, strip_nix_attribute
 
 
 LIST_COMMANDS = {
@@ -21,7 +21,7 @@ LIST_COMMANDS = {
     "snap": ["snap", "list"],
     "linyaps": ["ll-cli", "--json", "list", "--type=app"],
     "guix": ["guix", "package", "--list-installed"],
-    "nixpkgs": ["nix", "profile", "list", "--json"],
+    "nixpkgs": ["nix", *NIX_FLAKE_FLAGS, "profile", "list", "--json"],
 }
 
 # 没有安装任何包时这些命令会以非零状态退出，属于正常情况。
@@ -124,8 +124,34 @@ def _parse_guix(output):
     return packages
 
 
+def _store_path_parts(store_paths):
+    """store path 末段形如 `5z2yp3ysx8476c8g5w25b0smlgkjvaq3-hello-2.12.3`，去掉 32 位 hash 前缀后
+    剩下 `<包名>-<版本>`。`nix profile list --json` 里没有 version 字段，版本只能从这里取。"""
+    if not isinstance(store_paths, list):
+        return "", ""
+    for path in store_paths:
+        if not isinstance(path, str) or not path.strip():
+            continue
+        base = path.strip().rstrip("/").rsplit("/", 1)[-1]
+        head, _, tail = base.partition("-")
+        if tail and len(head) == 32 and all(character in "0123456789abcdfghijklmnpqrsvwxyz" for character in head):
+            base = tail
+        name, separator, version = base.rpartition("-")
+        if separator and name:
+            # 版本号要以数字开头（`libfoo-unstable-2024-01-02` 这种取整个后缀）
+            if version[:1].isdigit():
+                return name, version
+            return base, ""
+    return "", ""
+
+
 def _parse_nixpkgs(output):
-    """`nix profile list --json` 里每个元素的属性路径去掉前缀就是包名。"""
+    """`nix profile list --json` 里每个元素的属性路径去掉前缀就是包名。
+
+    JSON 的形状（nix 2.35）是 `{"elements": {"<元素名>": {"attrPath": …, "storePaths": [...]}}}`：
+    既没有 version 也没有 description，而且自己装自己的那个 `nix` 元素没有 attrPath——
+    所以要退到字典键、再退到 store path 来取名字，版本从 store path 里解析。
+    """
     try:
         payload = json.loads(output)
     except ValueError as error:
@@ -134,24 +160,29 @@ def _parse_nixpkgs(output):
         raise DickError("nix profile list 返回了无效的已安装列表")
     elements = payload.get("elements")
     if elements is None:
-        elements = []
+        elements = {}
     if isinstance(elements, dict):
-        records = list(elements.values())
+        records = list(elements.items())
     elif isinstance(elements, list):
-        records = elements
+        records = [(None, record) for record in elements]
     else:
         raise DickError("nix profile list 返回了无效的已安装列表")
     packages = []
-    for record in records:
+    for key, record in records:
+        version = ""
+        description = ""
         if isinstance(record, str):
-            name, version, description = strip_nix_attribute(record), "", ""
+            name = strip_nix_attribute(record)
         elif isinstance(record, dict):
-            attribute = record.get("attrPath") or record.get("name") or ""
-            if not isinstance(attribute, str) or not attribute:
-                continue
-            name = strip_nix_attribute(attribute)
-            version = record["version"] if isinstance(record.get("version"), str) else ""
-            description = record["description"] if isinstance(record.get("description"), str) else ""
+            attribute = record.get("attrPath") or record.get("name") or (key if isinstance(key, str) else "")
+            name = strip_nix_attribute(attribute) if isinstance(attribute, str) else ""
+            if isinstance(record.get("version"), str):
+                version = record["version"]
+            if isinstance(record.get("description"), str):
+                description = record["description"]
+            stored_name, stored_version = _store_path_parts(record.get("storePaths"))
+            name = name or stored_name
+            version = version or stored_version
         else:
             continue
         if name:

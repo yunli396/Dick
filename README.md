@@ -101,7 +101,7 @@ dick web
 | Snap | `snap find` 的列表输出 | `snap list` / `snap remove` | `snap install` | 已安装 Snap 时按需查询，查询缓存默认 15 分钟 |
 | Linyaps | `ll-cli --json search` 的 JSON | `ll-cli --json list --type=app` / `ll-cli uninstall` | `ll-cli install ID` | 已安装 `ll-cli` 时按需查询，查询缓存默认 15 分钟；仓库来自 `ll-cli --json repo show`，读取失败时退化为单一 `linglong` 仓库 |
 | Guix | `guix package -A <正则>` 的四列表格 | `guix package --list-installed` / `guix remove` | `guix install` | 已安装 `guix` 时按需查询，查询缓存默认一天（`[cache.query_ttl]`）；查询按包名匹配（大小写不敏感），`-A` 不输出描述，所以描述列为空；装进用户自己的 profile，不加 sudo |
-| Nixpkgs | `nix search --json nixpkgs <正则>` | `nix profile list --json` / `nix profile remove` | `nix profile install nixpkgs#名称` | 已安装 Nix 时按需查询，查询缓存默认一天（`[cache.query_ttl]`）；需要 Nix 2.4+ 的新 CLI（flake），未开启 `experimental-features = nix-command flakes` 时会给出提示；属性路径去掉 `legacyPackages.<系统>.` 前缀当名称；装进用户 profile，不加 sudo |
+| Nixpkgs | `nix search --json nixpkgs <正则>` | `nix profile list --json` / `nix profile remove` | `nix profile install nixpkgs#名称` | 已安装 Nix 时按需查询，查询缓存默认一天（`[cache.query_ttl]`）；需要 Nix 2.4+ 的新 CLI（flake），DICK 会自己带上 `--extra-experimental-features 'nix-command flakes'`，不必手改 `nix.conf`；属性路径去掉 `legacyPackages.<系统>.` 前缀当名称，精确匹配时优先整名相等（`hello` 不会被 `haskellPackages.hello` 顶掉，只有 `python3Packages.requests` 这类才退到末段匹配）；已安装列表的版本从 store 路径解析（`nix profile list --json` 没有版本字段）；装进用户 profile，不加 sudo |
 
 Pacman/APT/DNF/APK 搜索不执行 `pacman -Ss`、`apt search`、`dnf search` 或 `apk search`。Flatpak 的 OSTree/AppStream 数据需要额外协议和解析依赖，Snap 商店、Linyaps 仓库、Guix 与 Nixpkgs 也没有本原型采用的稳定公开全量索引格式（Linyaps 依赖 `ll-cli` 自己输出 JSON，Guix 用 `guix package -A`，Nixpkgs 用 `nix search --json`），所以按需求允许的例外使用原生命令。Flatpak/Snap/Linyaps 版本过旧、无远端或输出完全无法解析时会报告错误）。
 
@@ -157,6 +157,11 @@ dick remove firefox --source flatpak --yes
 ## 安装与降级
 
 Arch 默认 `pacman → aur → flatpak → linyaps → guix → nixpkgs → snap`；Debian 默认 `apt → flatpak → linyaps → guix → nixpkgs → snap`；Fedora 默认 `dnf → flatpak → linyaps → guix → nixpkgs → snap`；Alpine 默认 `apk → flatpak → linyaps → guix → nixpkgs → snap`。**snap 是固定垫底的兜底来源**：不管 `priority.order` 怎么写，它都会被挪到最后一名；配置里漏掉它也会自动补上（体积大、首次启动慢、桌面集成最差，只在其它来源都没有时才用）。手动写了 `[priority.<家族>] order` 的家族只会按列出的顺序降级，新增来源要自己加进去。逐来源查询准确名称，跳过不存在或不可执行的来源；原生命令失败后尝试下一来源。Ctrl+C 或信号退出会停止降级。多包安装逐包处理，结果逐项报告。
+
+安装失败时 DICK 会认出两类「本地元数据没跟上」，各来源最多自动刷新一次本地元数据再重试同一个命令，省得用户自己开终端：
+
+- **索引过期**：镜像上已经换了新版本，本地记的旧文件名一律 404（pacman 报「无法从 … 获取文件」/「无法提交处理」，apt 报 `Hash Sum mismatch`/404）。会先跑 `pacman -Sy`、`apt-get update`、`dnf makecache` 等再重试。
+- **本地包列表从没同步过**：DICK 自己的索引是刚从网上拉下来的，搜索看得到包，原生包管理器却只会说 `Unable to locate package`（apt）、`No match for argument`（dnf）、`target not found`（pacman）、`unable to select packages`（apk）——容器与刚装好的系统里很常见。同样先同步一次本地元数据再重试，仍失败才报告「认不出这个包：可能不在已启用的仓库（组件）里，也可能本地包列表还没同步」。
 
 ```bash
 dick install firefox
