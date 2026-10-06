@@ -306,6 +306,8 @@ def run_remove(settings, args):
             else:
                 shutil.rmtree(path)
         removed.append(str(path))
+    if not dry_run:
+        _prune_empty_dirs(installation)
     payload = {
         "action": "removeme",
         "kind": installation.kind,
@@ -325,6 +327,22 @@ def run_remove(settings, args):
         if kept:
             payload["message"] += " 保留配置：" + "、".join(str(path) for path in kept) + "（要一起删就加 --purge）"
     return payload
+
+
+def _prune_empty_dirs(installation):
+    """<前缀>/bin 与 <前缀>/share 空了就收走（前缀本身与非空目录一律不动）。"""
+    prefix = Path(installation.prefix) if installation.prefix is not None else None
+    parents = []
+    if installation.command is not None:
+        parents.append(Path(installation.command).parent)
+    if installation.share is not None:
+        parents.append(Path(installation.share).parent)
+    for path in parents:
+        try:
+            if path.is_dir() and path != prefix and not any(path.iterdir()):
+                path.rmdir()
+        except OSError:
+            pass
 
 
 def _confirm(targets):

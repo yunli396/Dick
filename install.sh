@@ -65,7 +65,7 @@ say "虚拟环境 $VENV ✓"
 
 # 3) 取源码：优先 git（以后能直接再跑一次升级），没有 git 就下 tarball
 TEMP_SRC=""
-cleanup() { [ -n "$TEMP_SRC" ] && rm -rf "$TEMP_SRC"; }
+cleanup() { if [ -n "$TEMP_SRC" ]; then rm -rf "$TEMP_SRC"; fi; }
 trap cleanup EXIT
 if [ -n "$FROM" ]; then
     [ -f "$FROM/pyproject.toml" ] || die "$FROM 里没有 pyproject.toml，不是 DICK 源码目录"

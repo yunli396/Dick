@@ -1438,6 +1438,10 @@ class SelfManageTests(FixtureTest):
         self.assertEqual(code, 0)
         self.assertFalse((prefix / "share/dick").exists())
         self.assertFalse((prefix / "bin/dick").is_symlink())
+        # 空掉的 bin/ 与 share/ 顺手收走，前缀目录本身留着
+        self.assertFalse((prefix / "bin").exists())
+        self.assertFalse((prefix / "share").exists())
+        self.assertTrue(prefix.is_dir())
         self.assertTrue(config.exists())
         self.assertIn("保留配置", errors)
 
