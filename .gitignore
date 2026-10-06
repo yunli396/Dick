@@ -7,3 +7,6 @@ dist/
 .pytest_cache/
 *.sqlite3*
 .cache/
+
+# 介绍视频（本地生成，不入库）
+docs/video/
