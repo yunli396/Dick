@@ -213,9 +213,13 @@ def run_remove(settings, action, args, sources):
         for package in chosen:
             command = installer.uninstall_command(package, args.deep)
             code = installer.execute(command)
-            results.append({"name": target, "source": package.source, "package": package.name,
-                            "version": package.version, "command": command,
-                            "returncode": code, "success": code == 0, "dry_run": args.dry_run})
+            record = {"name": target, "source": package.source, "package": package.name,
+                      "version": package.version, "command": command,
+                      "returncode": code, "success": code == 0, "dry_run": args.dry_run}
+            if code != 0:  # 报告里带上原生命令的原因，而不是光秃秃一个退出码
+                record["error"] = installer.failure_reason(code)
+                installer.report_uninstall_hint(package)
+            results.append(record)
     if args.json:
         emit({"results": results})
     return 0 if all(result["success"] for result in results) else 1

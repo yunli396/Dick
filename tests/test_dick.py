@@ -995,6 +995,29 @@ class InstallationTests(FixtureTest):
         self.assertIn("sudo ll-cli install -y com.qq.music", joined)
         self.assertIn("49-dick-linglong.rules", joined)
 
+    def test_running_app_uninstall_failure_is_explained(self):
+        """ll-cli 拒绝卸载正在运行的应用：报告要带原因，并提示用 ll-cli kill 结束它。"""
+        installer = self.installer(Mock())
+        installer.last_output = [
+            "执行：sudo ll-cli uninstall com.qq.music",
+            "The application is currently running and cannot be uninstalled. "
+            "Please turn off the application and try again."]
+        self.assertTrue(installer.looks_like_running_app())
+        self.assertEqual(installer.failure_reason(255),
+                         "The application is currently running and cannot be uninstalled. "
+                         "Please turn off the application and try again.")
+        self.assertTrue(installer.report_uninstall_hint(LocalPackage("linyaps", "com.qq.music")))
+        joined = "\n".join(self.messages)
+        self.assertIn("正在运行", joined)
+        self.assertIn("ll-cli kill com.qq.music", joined)
+        # 「in use」在别家输出里另有含义，不该套上玲珑的提示
+        self.assertFalse(installer.report_uninstall_hint(LocalPackage("apt", "com.qq.music")))
+        # 认不出原因时不要瞎猜，退回退出码
+        installer.last_output = ["执行：sudo ll-cli uninstall com.qq.music"]
+        self.assertFalse(installer.looks_like_running_app())
+        self.assertFalse(installer.report_uninstall_hint(LocalPackage("linyaps", "com.qq.music")))
+        self.assertEqual(installer.failure_reason(255), "退出码 255")
+
     def test_apk_guix_and_nixpkgs_install_and_remove_commands(self):
         """apk 装到系统里；guix / nixpkgs 装进用户自己的 profile（所以这三个来源不加 sudo）。"""
         installer = self.installer(Mock(), dry_run=True)
@@ -1523,6 +1546,36 @@ class WebAppTests(FixtureTest):
         self.assertEqual(snapshot["status"], "done")
         self.assertIn("ll-cli uninstall cn.wps.wps-office", "\n".join(snapshot["lines"]))
         self.assertEqual(payload["request"]["sources"], [source for source in SOURCES])
+
+    def test_remove_job_reports_why_a_running_app_cannot_be_uninstalled(self):
+        """网页里的卸载失败以前只说「退出码 255」；现在要把 ll-cli 的原话和 ll-cli kill 提示带出来。"""
+        app = self.app()
+        app.settings.root = Path("/")  # action 只允许在真实根目录下做系统变更
+        package = LocalPackage("linyaps", "com.qq.music", "1.1.8.3")
+
+        def read(settings, source):
+            return [package] if source == "linyaps" else []
+
+        def factory(settings, index, report, dry_run=False, yes=False, stream=None, password=None):
+            built = Installer(settings, index, report, dry_run, yes, stream=stream, password=password)
+            built.last_output = [
+                "执行：sudo ll-cli uninstall com.qq.music",
+                "The application is currently running and cannot be uninstalled. "
+                "Please turn off the application and try again."]
+            built.execute = lambda command: 255
+            return built
+
+        with patch("dick.web.Installer", side_effect=factory), \
+                patch.object(Settings, "available", return_value=True), \
+                patch("dick.web.read_installed", side_effect=read):
+            payload = app.action({}, {"action": "remove", "confirm": True, "yes": True,
+                                      "packages": [{"source": "linyaps", "name": "com.qq.music"}]})
+            snapshot = self.wait(app, payload["job"]["id"])
+        self.assertEqual(snapshot["status"], "done")
+        self.assertEqual(snapshot["result"]["results"][0]["error"],
+                         "The application is currently running and cannot be uninstalled. "
+                         "Please turn off the application and try again.")
+        self.assertIn("ll-cli kill com.qq.music", "\n".join(snapshot["lines"]))
 
     def test_upgrade_job_uses_native_manager(self):
         app = self.app()

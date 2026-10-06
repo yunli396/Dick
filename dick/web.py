@@ -795,9 +795,13 @@ class WebApp:
                 try:
                     command = installer.uninstall_command(package, deep)
                     code = installer.execute(command)
-                    results.append({"name": label, "source": package.source, "package": package.name,
-                                    "version": package.version, "command": command,
-                                    "returncode": code, "success": code == 0, "dry_run": dry_run})
+                    record = {"name": label, "source": package.source, "package": package.name,
+                              "version": package.version, "command": command,
+                              "returncode": code, "success": code == 0, "dry_run": dry_run}
+                    if code != 0:  # 报告里带上原生命令的原因，而不是光秃秃一个退出码
+                        record["error"] = installer.failure_reason(code)
+                        installer.report_uninstall_hint(package)
+                    results.append(record)
                 except DickError as error:
                     job.log(f"{package.source}/{package.name}：{error}")
                     results.append({"name": label, "source": package.source, "package": package.name,

@@ -28,6 +28,13 @@ STALE_INDEX = re.compile(
 # 场景只会等到「Error 9: not authorized」——所以这里也走 sudo（root 调用不需要 polkit 授权）。
 NOT_AUTHORIZED = re.compile(r"not authorized|未授权|权限不足", re.IGNORECASE)
 
+# ll-cli 不允许卸载正在运行的应用，原话是
+# 「The application is currently running and cannot be uninstalled. Please turn off the application and try again.」
+# 这条只出现在子进程输出里，退出码同样是没有信息量的 255，所以单独认出来补一条中文提示。
+RUNNING_APP = re.compile(
+    r"currently running|cannot be uninstalled|正在运行|运行中|正在被使用|in use", re.IGNORECASE
+)
+
 
 class Installer:
     def __init__(self, settings, index, report, dry_run=False, yes=False, stream=None, password=None):
@@ -83,6 +90,35 @@ class Installer:
 
     def looks_like_not_authorized(self):
         return bool(self.last_output) and bool(NOT_AUTHORIZED.search("\n".join(self.last_output)))
+
+    def looks_like_running_app(self):
+        return bool(self.last_output) and bool(RUNNING_APP.search("\n".join(self.last_output)))
+
+    def failure_reason(self, code):
+        """失败报告里的一句话：优先用原生命令自己吐的最后一行，其次才轮到退出码。
+
+        只报「退出码 255」等于没说：ll-cli 这类工具的原因全在输出里（正在运行、
+        polkit 拒绝、包不存在…），而输出早就被 _stream_run / execute 收进了 last_output。
+        """
+        for line in reversed(self.last_output or []):
+            text = line.strip()
+            # 跳过 DICK 自己回显的命令行；它们在演练/执行日志里有，当原因毫无信息量。
+            if text and not text.startswith(("执行：", "计划：", "演练：")):
+                return text
+        return f"退出码 {code}"
+
+    def report_uninstall_hint(self, package):
+        """卸载失败后补一条能照做的提示；没有已知模式就不多说。
+
+        只在玲珑上说话：`in use` 这类词在 apt/dnf 的输出里另有含义，
+        换成「玲珑不会卸载运行中的应用」就答非所问了。
+        """
+        if package.source != "linyaps" or not self.looks_like_running_app():
+            return False
+        self.report(f"{package.source}/{package.name} 正在运行，玲珑不会卸载正在运行的应用"
+                    f"（ll-cli ps 可以看到运行中的玲珑应用）。")
+        self.report(f"先在应用里退出，或者在宿主终端执行 ll-cli kill {package.name}，然后重试卸载。")
+        return True
 
     def refresh_command(self, source):
         """该来源刷新索引的命令；没有（比如 dnf 会自己更新元数据）就返回 None。"""

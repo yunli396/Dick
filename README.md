@@ -151,7 +151,7 @@ dick remove firefox --source flatpak --yes
 - 非交互（管道、`--json`）遇到多个候选会报错并列出全部候选，要求用 `--source` 或完整名称指定，不会自行猜测。
 - 非交互卸载必须显式给出 `--yes`，否则报错，避免脚本意外删除软件；`--dry-run` 只预览命令，因此不需要 `--yes`。
 
-`--deep` 翻译为 Pacman `-Rns`、APT `purge --autoremove`、DNF 的依赖清理配置、Flatpak `--delete-data`；各工具语义不完全相同。Flatpak、Snap、Guix、Nixpkgs 的卸载直接交给各自工具，不需要 `sudo`。玲珑在 DICK 里走 `sudo`（原因见下面的权限说明）。APK 用 `apk del`，Alpine 没有单独的 purge 概念，所以 `--deep` 对它没有额外效果。
+`--deep` 翻译为 Pacman `-Rns`、APT `purge --autoremove`、DNF 的依赖清理配置、Flatpak `--delete-data`；各工具语义不完全相同。Flatpak、Snap、Guix、Nixpkgs 的卸载直接交给各自工具，不需要 `sudo`。玲珑在 DICK 里走 `sudo`（原因见下面的权限说明）；另外玲珑不允许卸载**正在运行**的应用（`ll-cli ps` 能看到运行中的应用），遇到这种情况 DICK 会把 `ll-cli` 的原话报出来，并提示先在应用内退出或执行 `ll-cli kill <应用>` 再重试。APK 用 `apk del`，Alpine 没有单独的 purge 概念，所以 `--deep` 对它没有额外效果。
 
 ## 安装与降级
 
