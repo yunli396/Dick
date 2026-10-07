@@ -1,5 +1,7 @@
 import json
+import os
 from pathlib import Path
+import select
 import sqlite3
 import sys
 
@@ -64,6 +66,124 @@ def update_sources(settings, action, args):
     return 0
 
 
+def run_autorank(settings, action, args):
+    """`source autorank [enable|disable]`：只看状态或开关自动来源排序。"""
+    if not action.targets:
+        state = "已开启" if settings.autorank else "已关闭"
+        if args.json:
+            emit({"autorank": settings.autorank, "config": str(settings.config_path)})
+            return 0
+        print(f"自动来源排序：{state}")
+        print("  开启时：安装 IDE/开发类的 flatpak 候选会自动排到原生源之后"
+              "（沙箱访问不到系统级工具链）。")
+        print("  关闭后：安装完全按配置文件里的顺序来，可用 dick source ranking 手工排序。")
+        return 0
+    enabled = action.targets[0] == "enable"
+    settings.set_autorank(enabled)
+    if args.json:
+        emit({"autorank": settings.autorank, "config": str(settings.config_path)})
+        return 0
+    print(f"自动来源排序：{'已开启' if enabled else '已关闭'}（已写入 {settings.config_path}）")
+    if enabled:
+        print("安装时会自动把 IDE/开发类的 flatpak 候选排到原生源之后。")
+    else:
+        print("安装时不再自动重排来源；可用 dick source ranking 手工调整顺序。")
+    return 0
+
+
+def read_key(descriptor):
+    """读一个按键，把方向键的转义序列还原成 up / down / escape。
+
+    直接读文件描述符（而不是 sys.stdin）是必要的：raw 模式下 STDIN 已经禁用了行缓冲，
+    但 Python 的文本层还会自己预读，真用 sys.stdin.read 的话转义序列的后续字节会留在
+    Python 的缓冲区里，select 就再也等不到它们了。
+    """
+    character = os.read(descriptor, 1).decode("utf-8", "ignore")
+    if character != "\x1b":
+        return character
+    sequence = b""
+    while len(sequence) < 2 and select.select([descriptor], [], [], 0.05)[0]:
+        sequence += os.read(descriptor, 1)
+    if not sequence:
+        return "escape"  # 单独的 Esc：用户按的是取消，不是方向键
+    suffix = sequence.decode("utf-8", "ignore")
+    if suffix.startswith("["):
+        return {"[A": "up", "[B": "down", "[C": "right", "[D": "left"}.get(suffix, "escape")
+    return "escape"
+
+
+def draw_ranking(order, position):
+    """重排界面：清屏重画，免去记行数和处理 raw 模式下的换行。"""
+    lines = ["用 ↑/↓（或 k/j）上下移动高亮的来源，Enter 保存，q 取消：", ""]
+    for index, source in enumerate(order):
+        lines.append(f" {'▶' if index == position else ' '} {index + 1}. {source}")
+    lines.append("")
+    lines.append("不可用的来源不在此列表；它们会保留在配置里，排在最后（snap 恒垫底）。")
+    sys.stdout.write("\x1b[2J\x1b[H" + "\r\n".join(lines) + "\r\n")
+    sys.stdout.flush()
+
+
+def rank_sources(sources):
+    """方向键 TUI：返回排好的来源顺序，用户取消时返回 None。"""
+    try:
+        import termios
+        import tty
+    except ImportError:  # pragma: no cover - 只在非类 Unix 系统上走到
+        raise DickError("source ranking 的交互界面只在类 Unix 终端上可用") from None
+    descriptor = sys.stdin.fileno()
+    order = list(sources)
+    position = 0
+    saved = termios.tcgetattr(descriptor)
+    try:
+        tty.setraw(descriptor)
+        while True:
+            draw_ranking(order, position)
+            key = read_key(descriptor)
+            if key in {"down", "j"}:
+                if position < len(order) - 1:
+                    order[position], order[position + 1] = order[position + 1], order[position]
+                    position += 1
+            elif key in {"up", "k"}:
+                if position > 0:
+                    order[position], order[position - 1] = order[position - 1], order[position]
+                    position -= 1
+            elif key in {"\r", "\n", " "}:
+                return order
+            elif key in {"q", "escape", "\x03"}:
+                return None
+    finally:
+        termios.tcsetattr(descriptor, termios.TCSADRAIN, saved)
+        sys.stdout.write("\x1b[2J\x1b[H")
+        sys.stdout.flush()
+
+
+def run_ranking(settings, args):
+    """`source ranking`：关掉自动排序后手工排来源顺序，方向键界面。"""
+    if settings.autorank:
+        raise DickError("自动来源排序已开启；先运行 dick source autorank disable，"
+                        "再用 dick source ranking 手工排序")
+    sources = settings.available_sources()
+    if len(sources) < 2:
+        raise DickError("可排序的可用来源不足两个，无需排序")
+    if args.json:
+        emit({"autorank": False, "priority": list(settings.priority),
+              "rankable": sources, "config": str(settings.config_path)})
+        return 0
+    if not sys.stdin.isatty():
+        raise DickError("source ranking 需要交互式终端（TTY）；"
+                        "也可以直接编辑配置文件里的 [priority." + settings.family + "] order")
+    ordered = rank_sources(sources)
+    if ordered is None:
+        report("已取消，来源顺序未改动。")
+        return 0
+    # 不可用的来源不在界面里，但它们得留在配置里（以后装了 flatpak / nix 就轮得到），
+    # 于是按原来的相对顺序接在排好的列表后面；snap 由 set_priority 强制垫底。
+    merged = ordered + [source for source in settings.priority if source not in ordered]
+    saved = settings.set_priority(merged)
+    print("安装优先级已更新：" + " → ".join(saved))
+    return 0
+
+
 def source_hints(settings):
     """与仓库配置无关、但用户会关心的环境提示。
 
@@ -90,9 +210,14 @@ def show_sources(settings, action, args, repositories, errors):
         })
     if args.json:
         emit({"family": settings.family, "priority": list(settings.priority),
+              "autorank": settings.autorank,
               "sources": entries, "errors": errors, "hints": hints})
         return 1 if errors else 0
     print(f"系统：{settings.family}；安装优先级：{' → '.join(settings.priority)}")
+    if settings.autorank:
+        print("自动来源排序：已开启（flatpak 的 IDE/开发类候选会自动排到原生源之后）")
+    else:
+        print("自动来源排序：已关闭（安装完全按上面的顺序；可用 dick source ranking 调整）")
     for entry in entries:
         states = ["已启用" if entry["enabled"] else "已禁用", "可用" if entry["available"] else "不可用"]
         print(f"[{entry['source']}] {'，'.join(states)}")
@@ -280,12 +405,17 @@ def run(argv):
         return 0
     action = normalize(remaining)
     settings = Settings(args.config, args.root, args.cache_dir, args.jobs,
-                        create=action.name in {"source_enable", "source_disable", "web"})
+                        create=action.name in {"source_enable", "source_disable",
+                                               "source_autorank", "source_ranking", "web"})
     if action.name in {"updateme", "removeme"}:
         return run_self(settings, action, args)
     check_enabled(settings, args, action)
     if action.name in {"source_enable", "source_disable"}:
         return update_sources(settings, action, args)
+    if action.name == "source_autorank":
+        return run_autorank(settings, action, args)
+    if action.name == "source_ranking":
+        return run_ranking(settings, args)
     if action.name == "web":
         from .web import serve
         return serve(settings, args.host or settings.web_host, args.port or settings.web_port,

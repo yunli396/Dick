@@ -195,6 +195,21 @@
           <ul class="source-list large" id="settingsSources"></ul>
         </article>
         <article class="card">
+          <h2>来源排序</h2>
+          <label class="switch" title="开启时安装会按包的特征微调来源顺序">
+            <input type="checkbox" id="autorankToggle"><span>自动来源排序</span>
+          </label>
+          <p class="muted small" id="autorankHint"></p>
+          <div id="rankingBox" hidden>
+            <p class="muted small">关闭自动排序后在这里手工排：拖拽（或用 ↑/↓ 按钮）调整顺序，只有本机可用的来源会列出来，不可用的来源保留在配置里、排在最后。</p>
+            <ul class="rank-list" id="rankingList"></ul>
+            <div class="btn-row">
+              <button class="btn btn-primary" id="rankingSave">保存顺序</button>
+              <button class="btn" id="rankingReload">放弃改动</button>
+            </div>
+          </div>
+        </article>
+        <article class="card">
           <h2>运行信息</h2>
           <dl class="kv" id="runtimeInfo"></dl>
         </article>

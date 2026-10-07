@@ -302,10 +302,13 @@ class Installer:
         flatpak 的沙箱访问不到系统级工具链，IDE 装进去往往缺编译器/SDK/容器。用户把
         flatpak 排在原生源之前时，这里先把 flatpak 挪到最后一个原生源之后再试（snap
         恒在最后，不受影响）。预扫描只在「flatpak 在序、可用、且原生源也参与」时才做，
-        免得默认顺序（pacman 在前）下白跑一次 flatpak 搜索。
+        免得默认顺序（pacman 在前）下白跑一次 flatpak 搜索。设置里关掉自动来源排序
+        （install.autorank = false，见 dick source autorank）后，这里一步都不动。
         """
         order = [source for source in self.settings.priority if source in sources]
         order.extend(source for source in sources if source not in order)
+        if not getattr(self.settings, "autorank", True):
+            return order, None  # 用户关掉了自动来源排序：完全按配置顺序来
         if "flatpak" not in order or not self.settings.available("flatpak"):
             return order, None
         flatpak_at = order.index("flatpak")

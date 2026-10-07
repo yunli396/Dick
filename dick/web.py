@@ -324,6 +324,8 @@ class WebApp:
             ("GET", "/api/sources"): self.sources,
             ("POST", "/api/sources/enable"): self.enable_sources,
             ("POST", "/api/sources/disable"): self.disable_sources,
+            ("POST", "/api/settings/autorank"): self.save_autorank,
+            ("POST", "/api/settings/priority"): self.save_priority,
             ("GET", "/api/search"): self.search,
             ("GET", "/api/installed"): self.installed,
             ("GET", "/api/candidates"): self.candidates,
@@ -431,7 +433,8 @@ class WebApp:
                 "repositories": sum(1 for repository in repositories if repository.source == source),
             })
         return {"family": self.settings.family, "architecture": self.settings.architecture,
-                "priority": list(self.settings.priority), "sources": entries, "errors": errors,
+                "priority": list(self.settings.priority), "autorank": self.settings.autorank,
+                "sources": entries, "errors": errors,
                 "version": __version__, "config_path": str(self.settings.config_path),
                 "cache_dir": str(self.settings.cache_dir), "root": str(self.settings.root),
                 "ai": self.translator.describe(), "offline": self.icons.offline,
@@ -590,6 +593,32 @@ class WebApp:
         self.settings.set_enabled(ordered)
         return {"enabled": list(self.settings.enabled_sources),
                 "config_path": str(self.settings.config_path)}
+
+    def save_autorank(self, query, body):
+        """设置页的「自动来源排序」开关，写回 [install] autorank。"""
+        enabled = body.get("enabled")
+        if not isinstance(enabled, bool):
+            raise DickError("需要 enabled 布尔值")
+        self.settings.set_autorank(enabled)
+        return {"autorank": self.settings.autorank, "config_path": str(self.settings.config_path)}
+
+    def save_priority(self, query, body):
+        """设置页拖拽出来的安装优先级，写回 [priority.<家族>] order。
+
+        与 CLI 的 `source ranking` 同一规矩：自动来源排序开着时不许手工排——否则
+        「谁先谁后」有两个主人，用户改了顺序却还在自动微调，很难解释。
+        """
+        order = body.get("order")
+        if not isinstance(order, list) or not order:
+            raise DickError("需要 order 来源列表")
+        values = [str(source) for source in order]
+        for source in values:
+            if source not in SOURCES:
+                raise DickError(f"未知来源：{source}；可选：" + "、".join(SOURCES))
+        if self.settings.autorank:
+            raise DickError("自动来源排序已开启：先在设置页关掉它，再手工排序来源")
+        saved = self.settings.set_priority(values)
+        return {"priority": saved, "config_path": str(self.settings.config_path)}
 
     def search(self, query, body):
         text = (query.get("q") or "").strip()

@@ -86,10 +86,19 @@ class Settings:
             configured_sources = self.data.get("sources", {})
             ai = self.data.get("ai", {})
             web = self.data.get("web", {})
+            install = self.data.get("install", {})
         except (TypeError, ValueError, AttributeError) as error:
             raise DickError(f"配置字段类型错误：{error}") from error
         if not isinstance(self.prefer, str) or self.prefer not in {"auto", "pacman", "apt"}:
             raise DickError("syntax.prefer 必须为 auto、pacman 或 apt")
+        if not isinstance(install, dict):
+            raise DickError("install 配置必须是表")
+        # 自动来源排序：开启时安装会按包的特征微调顺序（目前只有「flatpak 的 IDE/开发类
+        # 候选降到原生源之后」这一条，见 Installer._ordered_sources）。关掉后顺序完全由
+        # [priority.<家族>] order 决定，可用 dick source ranking 手工排。
+        self.autorank = install.get("autorank", True)
+        if not isinstance(self.autorank, bool):
+            raise DickError("install.autorank 必须为布尔值")
         enabled = configured_sources.get("enabled")
         if enabled is not None and (not isinstance(enabled, list) or any(
                 not isinstance(source, str) or source not in SOURCES for source in enabled)):
@@ -217,6 +226,16 @@ class Settings:
     def enabled(self, source):
         return source in self.enabled_sources
 
+    def available_sources(self):
+        """本机可用的来源，按当前安装优先级排列。
+
+        `source ranking` 与网页的来源排序列表都用它：不可用的来源（没装的 flatpak、
+        不是 Arch 的 aur 等）排不排都一样，索性不出现在可拖拽的列表里。
+        """
+        available = [source for source in SOURCES if self.available(source)]
+        ordered = [source for source in self.priority if source in available]
+        return ordered + [source for source in available if source not in ordered]
+
     def _config_lines(self):
         path = self.config_path
         try:
@@ -272,6 +291,44 @@ class Settings:
         ordered = [source for source in SOURCES if source in set(sources)]
         self.write_section("sources", {"enabled": "[" + ", ".join(f'"{source}"' for source in ordered) + "]"})
         self.enabled_sources = tuple(ordered)
+
+    def set_autorank(self, enabled):
+        """开关「自动来源排序」，写回 [install] autorank 并刷新内存状态。"""
+        enabled = bool(enabled)
+        self.write_section("install", {"autorank": "true" if enabled else "false"})
+        stored = self.data.get("install")
+        if not isinstance(stored, dict):
+            stored = {}
+        stored["autorank"] = enabled
+        self.data["install"] = stored
+        self.autorank = enabled
+        return enabled
+
+    def set_priority(self, order):
+        """把手工排好的安装优先级写回 [priority.<家族>] order。
+
+        无论传进来什么，snap 都被挪到最后一名（与加载时一致）：它是兜底来源，不该被
+        排到别人前面。写回后同步内存里的 self.priority。
+        """
+        if not isinstance(order, list) or not order or any(
+                not isinstance(source, str) or source not in SOURCES for source in order):
+            raise DickError("priority.order 必须为非空来源列表：" + ", ".join(SOURCES))
+        if len(set(order)) != len(order):
+            raise DickError("priority.order 不能包含重复来源")
+        ordered = [source for source in order if source != LAST_SOURCE] + [LAST_SOURCE]
+        literal = "[" + ", ".join(f'"{source}"' for source in ordered) + "]"
+        self.write_section(f"priority.{self.family}", {"order": literal})
+        stored = self.data.get("priority")
+        if not isinstance(stored, dict):
+            stored = {}
+        family = stored.get(self.family)
+        if not isinstance(family, dict):
+            family = {}
+        family["order"] = ordered
+        stored[self.family] = family
+        self.data["priority"] = stored
+        self.priority = ordered
+        return list(ordered)
 
     def set_ai(self, values):
         """把 AI 设置写回 [ai] 段并刷新内存状态。"""

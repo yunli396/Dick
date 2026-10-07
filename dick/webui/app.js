@@ -421,6 +421,8 @@ async function loadSources(scan = false) {
   renderSources();
   renderChips();
   renderSettingsSources();
+  // loadStatus 与 loadSources 是并发跑的：来源列表后到，排序列表要等它到齐再画一遍。
+  if (state.status) paintAutorank(state.status);
   if (data.errors && data.errors.length) toast(`来源提示：${data.errors.join('；')}`, 'err');
 }
 
@@ -508,6 +510,138 @@ async function switchSource(source, enable) {
   }
 }
 
+/* ------------------------------------------------- 自动来源排序与手工排序 */
+
+// 可排序的来源 = 本机可用的那些，按当前优先级排列。不可用的来源排了也没用，
+// 所以不出现在列表里（保存时会原样留在它们原来的相对位置上）。
+function rankableSources() {
+  const priority = state.priority || [];
+  const available = (state.sources || [])
+    .filter((item) => item.available).map((item) => item.source);
+  const ordered = priority.filter((source) => available.includes(source));
+  for (const source of available) if (!ordered.includes(source)) ordered.push(source);
+  return ordered;
+}
+
+function paintAutorank(status) {
+  state.priority = status.priority || [];
+  state.ranking = rankableSources();
+  const toggle = $('#autorankToggle');
+  toggle.checked = Boolean(status.autorank);
+  $('#autorankHint').textContent = status.autorank
+    ? '开启中：安装 IDE/开发类的 flatpak 候选时，会自动把 flatpak 排到原生源之后（沙箱访问不到系统级工具链）。关掉它就能手工排序。'
+    : '已关闭：安装完全按下面的顺序来，不再自动重排。';
+  $('#rankingBox').hidden = Boolean(status.autorank);
+  if (!status.autorank) renderRanking();
+}
+
+function renderRanking() {
+  const list = $('#rankingList');
+  list.replaceChildren();
+  const order = state.ranking || [];
+  const details = new Map((state.sources || []).map((item) => [item.source, item]));
+  if (order.length < 2) {
+    list.append(el('li', { class: 'muted', text: '本机可用的来源不足两个，无需排序。' }));
+    return;
+  }
+  order.forEach((source, index) => {
+    const item = details.get(source) || {};
+    const row = el('li', { draggable: 'true', class: 'rank-row' });
+    row.dataset.source = source;
+    row.dataset.index = String(index);
+    row.append(el('span', { class: 'rank-handle', text: '⠿', title: '拖动排序' }));
+    row.append(el('span', { class: 'rank-index', text: String(index + 1) }));
+    row.append(el('strong', { text: source }));
+    row.append(el('span', {
+      class: 'count',
+      text: item.enabled ? '已启用' : '已禁用',
+    }));
+    row.append(el('span', { class: 'rank-actions' }, [
+      el('button', {
+        class: 'link', text: '↑', title: '上移一位', disabled: index === 0,
+        onclick: () => moveRanking(index, -1),
+      }),
+      el('button', {
+        class: 'link', text: '↓', title: '下移一位', disabled: index === order.length - 1,
+        onclick: () => moveRanking(index, 1),
+      }),
+    ]));
+    list.append(row);
+  });
+}
+
+function moveRanking(index, delta) {
+  const order = state.ranking;
+  const target = index + delta;
+  if (target < 0 || target >= order.length) return;
+  [order[index], order[target]] = [order[target], order[index]];
+  renderRanking();
+}
+
+async function toggleAutorank(enabled) {
+  try {
+    await api('/api/settings/autorank', { method: 'POST', body: { enabled } });
+    toast(enabled ? '已开启自动来源排序' : '已关闭自动来源排序，可在设置页手工排序');
+    await loadStatus();
+  } catch (error) {
+    toast(error.message, 'err');
+    await loadStatus();
+  }
+}
+
+async function saveRanking() {
+  // 列表里只有可用来源；把不可用来源按原顺序接在后面，避免它们从配置里消失。
+  const ordered = [...(state.ranking || [])];
+  const merged = ordered.concat((state.priority || []).filter((source) => !ordered.includes(source)));
+  try {
+    const answer = await api('/api/settings/priority', { method: 'POST', body: { order: merged } });
+    toast('安装优先级已保存');
+    state.priority = answer.priority || merged;
+    await loadStatus();
+  } catch (error) {
+    toast(error.message, 'err');
+  }
+}
+
+function bindRankingDrag() {
+  const list = $('#rankingList');
+  let dragged = null;
+  list.addEventListener('dragstart', (event) => {
+    const row = event.target.closest('li[data-source]');
+    if (!row) return;
+    dragged = row.dataset.source;
+    row.classList.add('dragging');
+    event.dataTransfer.effectAllowed = 'move';
+  });
+  list.addEventListener('dragover', (event) => {
+    if (dragged === null) return;
+    event.preventDefault();
+    event.dataTransfer.dropEffect = 'move';
+    for (const node of $$('li.drop-target', list)) node.classList.remove('drop-target');
+    const row = event.target.closest('li[data-source]');
+    if (row) row.classList.add('drop-target');
+  });
+  list.addEventListener('drop', (event) => {
+    event.preventDefault();
+    const row = event.target.closest('li[data-source]');
+    if (!row || dragged === null) return;
+    const from = state.ranking.indexOf(dragged);
+    const to = state.ranking.indexOf(row.dataset.source);
+    dragged = null;
+    if (from < 0 || to < 0 || from === to) return;
+    const [moved] = state.ranking.splice(from, 1);
+    state.ranking.splice(to, 0, moved);
+    renderRanking();
+  });
+  list.addEventListener('dragend', (event) => {
+    dragged = null;
+    const row = event.target.closest('li[data-source]');
+    if (row) row.classList.remove('dragging');
+    for (const node of $$('li.drop-target', list)) node.classList.remove('drop-target');
+  });
+}
+
+
 /* ------------------------------------------------------------------ 状态与 AI 设置 */
 
 async function loadStatus() {
@@ -542,6 +676,7 @@ async function loadStatus() {
   $('#aiEnabled').checked = Boolean(ai.enabled);
   paintAiState(ai);
   updateAiHint();
+  paintAutorank(status);
 
   state.boot = status.boot;
   const self = status.self || {};
@@ -1384,6 +1519,10 @@ function bindEvents() {
   $('#aiModels').addEventListener('click', fetchModels);
   $('#aiApi').addEventListener('change', updateAiHint);
   $('#aiBaseUrl').addEventListener('input', updateAiHint);
+  $('#autorankToggle').addEventListener('change', (event) => toggleAutorank(event.target.checked));
+  $('#rankingSave').addEventListener('click', saveRanking);
+  $('#rankingReload').addEventListener('click', () => { state.ranking = rankableSources(); renderRanking(); });
+  bindRankingDrag();
   $('#tokenForm').addEventListener('submit', (event) => {
     event.preventDefault();
     submitToken($('#tokenInput').value);

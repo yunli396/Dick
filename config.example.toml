@@ -21,6 +21,14 @@ order = ["dnf", "flatpak", "linyaps", "guix", "nixpkgs", "snap"]
 [priority.alpine]
 order = ["apk", "flatpak", "linyaps", "guix", "nixpkgs", "snap"]
 
+# 自动来源排序（默认 true）：安装时若 flatpak 排在原生源（pacman/apt/dnf/apk）前面，
+# 而目标又是 IDE / 开发类应用（AppStream 分类含 IDE 或 Development），就把它自动降到
+# 原生源之后再试——flatpak 沙箱访问不到系统级工具链。改成 false 就完全按上面的 order
+# 来，可用 `dick source ranking`（方向键界面）或网页设置页的拖拽列表手工排序。
+# 网页上的「自动来源排序」开关与 `dick source autorank enable|disable` 都写回这一行。
+[install]
+autorank = true
+
 [cache]
 ttl = 900
 

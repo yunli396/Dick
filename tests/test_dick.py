@@ -888,6 +888,45 @@ class ConfigTests(FixtureTest):
         with self.assertRaisesRegex(DickError, "不能包含重复来源"):
             Settings(duplicate, self.root, self.root / "c4")
 
+    def test_autorank_defaults_on_and_toggles_in_the_config(self):
+        """默认自动排序；开关写进 [install] 段，注释和别的段都要留着。"""
+        self.assertTrue(self.settings.autorank)
+        config = self.write("rank/dick.toml", "# 我的注释\n[syntax]\nprefer = \"pacman\"\n")
+        settings = Settings(config, self.root, self.root / "rank-cache", create=True)
+        settings.set_autorank(False)
+        text = config.read_text(encoding="utf-8")
+        self.assertIn("# 我的注释", text)
+        self.assertIn('prefer = "pacman"', text)
+        self.assertIn("[install]\nautorank = false", text)
+        self.assertFalse(Settings(config, self.root, self.root / "rank-cache").autorank)
+        settings.set_autorank(True)
+        self.assertIn("autorank = true", config.read_text(encoding="utf-8"))
+        self.assertEqual(config.read_text(encoding="utf-8").count("autorank"), 1)
+        self.assertTrue(Settings(config, self.root, self.root / "rank-cache").autorank)
+        for broken in ('[install]\nautorank = "是"\n', "[install]\nautorank = 1\n", "[install]\n= 1\n"):
+            with self.subTest(broken=broken), self.assertRaises(DickError):
+                Settings(self.write("rank/broken.toml", broken), self.root, self.root / "rank-cache-2")
+
+    def test_set_priority_writes_the_order_and_keeps_snap_last(self):
+        config = self.write("rank/priority.toml", "# 顶部注释\n[syntax]\nprefer = \"pacman\"\n")
+        settings = Settings(config, self.root, self.root / "priority-cache", create=True)
+        self.assertEqual(settings.set_priority(["flatpak", "pacman"]), ["flatpak", "pacman", "snap"])
+        text = config.read_text(encoding="utf-8")
+        self.assertIn("# 顶部注释", text)
+        self.assertIn('[priority.arch]\norder = ["flatpak", "pacman", "snap"]', text)
+        reloaded = Settings(config, self.root, self.root / "priority-cache")
+        self.assertEqual(reloaded.priority, ["flatpak", "pacman", "snap"])
+        self.assertEqual(settings.priority, ["flatpak", "pacman", "snap"])
+        for broken in ([], "pacman", ["pip"], ["pacman", "pacman"], ["pacman", 1]):
+            with self.subTest(broken=broken), self.assertRaises(DickError):
+                settings.set_priority(broken)
+
+    def test_available_sources_follow_priority_then_append_the_rest(self):
+        settings = Settings(self.config, self.root, self.root / "avail-cache", create=True)
+        settings.priority = ["aur", "pacman", "flatpak", "snap"]
+        settings.available = lambda source: source in {"pacman", "flatpak", "nixpkgs"}
+        self.assertEqual(settings.available_sources(), ["pacman", "flatpak", "nixpkgs"])
+
     def test_alpine_family_prefers_apk_and_knows_the_new_sources(self):
         self.write("etc/os-release", "ID=alpine\n")
         settings = Settings(self.config, self.root, self.root / "alpine-cache", create=True)
@@ -1066,6 +1105,9 @@ class SyntaxTests(unittest.TestCase):
             ("source", "scan"): "source_scan",
             ("source", "enable", "flatpak"): "source_enable",
             ("source", "disable", "aur", "snap"): "source_disable",
+            ("source", "autorank"): "source_autorank",
+            ("source", "autorank", "disable"): "source_autorank",
+            ("source", "ranking"): "source_ranking",
             ("install", "firefox"): "install",
             ("remove", "firefox"): "remove",
             ("list",): "list",
@@ -1092,7 +1134,8 @@ class SyntaxTests(unittest.TestCase):
         for arguments in (["install"], ["remove"], ["search"], ["update", "firefox"], ["upgrade", "firefox"],
                           ["updateme", "firefox"], ["removeme", "firefox"],
                           ["source"], ["source", "enable"], ["source", "disable"], ["source", "reset"],
-                          ["source", "list", "extra"],
+                          ["source", "list", "extra"], ["source", "autorank", "on"],
+                          ["source", "autorank", "enable", "disable"], ["source", "ranking", "extra"],
                           *([command, "firefox"] for command in removed)):
             with self.subTest(arguments=arguments), self.assertRaises(DickError):
                 normalize(arguments)
@@ -1102,6 +1145,13 @@ class SyntaxTests(unittest.TestCase):
             normalize(["source", "enable", "pip"])
         with self.assertRaisesRegex(DickError, "不能为空"):
             normalize(["install", "--unsafe"])
+
+    def test_source_autorank_takes_only_enable_or_disable(self):
+        self.assertEqual(normalize(["source", "autorank"]).targets, ())
+        self.assertEqual(normalize(["source", "autorank", "enable"]).targets, ("enable",))
+        self.assertEqual(normalize(["source", "autorank", "disable"]).targets, ("disable",))
+        with self.assertRaisesRegex(DickError, "只接受 enable 或 disable"):
+            normalize(["source", "autorank", "yes"])
 
     def test_global_options_and_unknown_flags(self):
         args, remaining = options(["--dry-run", "--source", "pacman", "--yes", "--exact", "--deep",
@@ -1487,6 +1537,69 @@ class CLITests(FixtureTest):
             code, output, _ = self.run_cli(self.common("--json", "source", "scan", "--source", "aur"))
         self.assertEqual(code, 0)
         self.assertEqual(json.loads(output)["hints"], [])
+
+    def test_source_autorank_shows_and_toggles_the_setting(self):
+        config = self.root / "conf" / "rank.toml"
+        rank = self.common("--config", str(config))
+        code, output, _ = self.run_cli([*rank, "source", "autorank"])
+        self.assertEqual(code, 0)
+        self.assertIn("自动来源排序：已开启", output)
+        code, output, _ = self.run_cli([*rank, "--json", "source", "autorank"])
+        self.assertTrue(json.loads(output)["autorank"])
+        code, output, _ = self.run_cli([*rank, "--json", "source", "autorank", "disable"])
+        self.assertEqual(code, 0)
+        self.assertFalse(json.loads(output)["autorank"])
+        self.assertIn("autorank = false", config.read_text(encoding="utf-8"))
+        code, output, _ = self.run_cli([*rank, "source", "list"])
+        self.assertEqual(code, 0)
+        self.assertIn("自动来源排序：已关闭", output)
+        code, output, _ = self.run_cli([*rank, "--json", "source", "autorank", "enable"])
+        self.assertTrue(json.loads(output)["autorank"])
+        code, output, _ = self.run_cli([*rank, "source", "list"])
+        self.assertIn("自动来源排序：已开启", output)
+
+    def test_source_ranking_needs_autorank_off_and_a_terminal(self):
+        config = self.root / "conf" / "ranking.toml"
+        rank = self.common("--config", str(config))
+        code, _, errors = self.run_cli([*rank, "source", "ranking"])
+        self.assertEqual(code, 1)  # 默认开着自动排序
+        self.assertIn("autorank disable", errors)
+        self.run_cli([*rank, "source", "autorank", "disable"])
+        available = {"pacman", "flatpak", "nixpkgs", "snap"}
+        with patch.object(Settings, "available", side_effect=lambda source: source in available):
+            code, output, _ = self.run_cli([*rank, "--json", "source", "ranking"])
+            self.assertEqual(code, 0)
+            payload = json.loads(output)
+            self.assertFalse(payload["autorank"])
+            self.assertEqual(payload["rankable"], ["pacman", "flatpak", "nixpkgs", "snap"])
+            with patch("dick.cli.sys.stdin", Mock(isatty=lambda: False)):
+                code, _, errors = self.run_cli([*rank, "source", "ranking"])
+        self.assertEqual(code, 1)
+        self.assertIn("TTY", errors)
+
+    def test_source_ranking_saves_the_order_and_keeps_snap_last(self):
+        config = self.root / "conf" / "save-rank.toml"
+        rank = self.common("--config", str(config))
+        self.run_cli([*rank, "source", "autorank", "disable"])
+        with patch.object(Settings, "available", return_value=True), \
+                patch("dick.cli.sys.stdin", Mock(isatty=lambda: True)), \
+                patch("dick.cli.rank_sources", return_value=["aur", "pacman"]) as sort:
+            code, output, _ = self.run_cli([*rank, "source", "ranking"])
+        self.assertEqual(code, 0)
+        sort.assert_called_once()
+        self.assertIn("安装优先级已更新：aur → pacman", output)
+        saved = Settings(config, self.root, self.root / "saved-cache").priority
+        self.assertEqual(saved[:2], ["aur", "pacman"])
+        self.assertEqual(saved[-1], LAST_SOURCE)  # snap 恒垫底
+        # 取消：不落盘、不报错
+        before = config.read_text(encoding="utf-8")
+        with patch.object(Settings, "available", return_value=True), \
+                patch("dick.cli.sys.stdin", Mock(isatty=lambda: True)), \
+                patch("dick.cli.rank_sources", return_value=None):
+            code, _, errors = self.run_cli([*rank, "source", "ranking"])
+        self.assertEqual(code, 0)
+        self.assertIn("未改动", errors)
+        self.assertEqual(config.read_text(encoding="utf-8"), before)
 
     def test_list_reads_installed_packages_per_source(self):
         installed = {
@@ -2532,6 +2645,48 @@ class WebHttpTests(FixtureTest):
         self.assertEqual(payload["boot"], web.BOOT_ID)
         self.assertIn("can_update", payload["self"])
 
+    def test_autorank_and_priority_endpoints_write_the_config(self):
+        self.assertTrue(json.loads(self.request("/api/status")[2])["autorank"])  # 默认开启
+        status, _, body = self.request("/api/settings/autorank", "POST", {"enabled": "yes"})
+        self.assertEqual(status, 400)
+        self.assertIn("布尔值", json.loads(body)["error"])
+        status, _, body = self.request("/api/settings/autorank", "POST", {"enabled": False})
+        self.assertEqual(status, 200)
+        self.assertFalse(json.loads(body)["autorank"])
+        self.assertIn("autorank = false", (self.root / "etc/dick.toml").read_text(encoding="utf-8"))
+        self.assertFalse(json.loads(self.request("/api/status")[2])["autorank"])
+        status, _, body = self.request("/api/settings/priority", "POST", {"order": ["flatpak", "pacman"]})
+        self.assertEqual(status, 200)
+        saved = json.loads(body)["priority"]
+        self.assertEqual(saved[:2], ["flatpak", "pacman"])
+        self.assertEqual(saved[-1], LAST_SOURCE)
+        self.assertIn('[priority.arch]\norder = ["flatpak", "pacman", "snap"]',
+                      (self.root / "etc/dick.toml").read_text(encoding="utf-8"))
+        for payload, message in (({"order": ["pip"]}, "未知来源"), ({"order": []}, "order")):
+            with self.subTest(payload=payload):
+                status, _, body = self.request("/api/settings/priority", "POST", payload)
+                self.assertEqual(status, 400)
+                self.assertIn(message, json.loads(body)["error"])
+        # 自动排序开着的时候不允许手工排序
+        self.request("/api/settings/autorank", "POST", {"enabled": True})
+        status, _, body = self.request("/api/settings/priority", "POST", {"order": ["pacman"]})
+        self.assertEqual(status, 400)
+        self.assertIn("自动来源排序已开启", json.loads(body)["error"])
+
+    def test_static_assets_keep_the_ranking_controls(self):
+        """设置页的自动排序开关与可拖拽排序列表必须一直在（纯前端逻辑）。"""
+        _, _, home = self.request("/")
+        for marker in (b'id="autorankToggle"', b'id="autorankHint"', b'id="rankingBox"',
+                       b'id="rankingList"', b'id="rankingSave"', b'id="rankingReload"'):
+            self.assertIn(marker, home)
+        _, _, script = self.request("/assets/app.js")
+        for marker in (b"paintAutorank", b"renderRanking", b"moveRanking", b"bindRankingDrag",
+                       b"rankableSources", b"/api/settings/autorank", b"/api/settings/priority"):
+            self.assertIn(marker, script)
+        _, _, styles = self.request("/assets/app.css")
+        for marker in (b".rank-list", b".rank-actions", b"dragging"):
+            self.assertIn(marker, styles)
+
     def test_static_assets_keep_the_token_gate_and_privilege_prompt(self):
         """令牌门、提权密码框、令牌清洗必须一直待在静态资源里（都是纯前端逻辑）。"""
         _, _, home = self.request("/")
@@ -2879,6 +3034,26 @@ class PasswordPrivilegeTests(FixtureTest):
         self.assertEqual(tried, ["pacman", "flatpak"])
         self.assertFalse(result["success"])
         self.assertTrue(any("做开发建议用原生源" in line for line in lines))
+
+    def test_install_keeps_flatpak_first_when_autorank_is_off(self):
+        """关掉自动排序后：flatpak 排哪就排哪，只留一句提示，不再自动重排。"""
+        settings, index = self.ide_index('["flatpak", "pacman", "aur"]')
+        settings.autorank = False
+        lines = []
+        installer = Installer(settings, index, lines.append, dry_run=False, yes=True)
+        installer.install_command = lambda package: ["echo", package.source]
+        tried = []
+
+        def execute(command):
+            tried.append(command[-1])
+            return 0  # flatpak 第一个就成功
+
+        installer.execute = execute
+        result = installer.install("code", ["flatpak", "pacman", "aur"])
+        self.assertEqual(tried, ["flatpak"])
+        self.assertTrue(result["success"])
+        self.assertTrue(any("做开发建议用原生源" in line for line in lines))
+        self.assertFalse([line for line in lines if "排到原生源之后" in line])
 
     def test_stale_index_detection_matches_real_manager_output(self):
         """pacman/apt 索引过期时的报错都要能认出来；普通冲突等失败不能误判成过期。"""

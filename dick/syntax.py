@@ -15,6 +15,9 @@ HELP = """DICK — Detective Index Collection Kit
   source scan              重新扫描本机来源配置并列出识别到的仓库
   source enable  来源...   启用来源，写入配置文件
   source disable 来源...   禁用来源，写入配置文件
+  source autorank [开关]   自动来源排序（IDE/开发类的 flatpak 候选自动降到原生源之后）
+                           不带参数只看当前状态，用 enable / disable 开关
+  source ranking           手工调整来源顺序（方向键；需先 source autorank disable）
   install 包名...          安装，按来源优先级自动降级
   remove  包名...          卸载，扫描已安装的同名/相似包后询问卸载哪个
   list    [关键词...]      列出本机已安装的包
@@ -121,7 +124,7 @@ def normalize(arguments):
 
 def source_action(rest):
     if not rest:
-        raise DickError("source 需要子命令：list / scan / enable / disable")
+        raise DickError("source 需要子命令：list / scan / enable / disable / autorank / ranking")
     subcommand, *targets = rest
     if subcommand in {"list", "scan"}:
         if targets:
@@ -134,4 +137,15 @@ def source_action(rest):
             if target not in SOURCES:
                 raise DickError(f"未知来源：{target}；可选：" + ", ".join(SOURCES))
         return Action(f"source_{subcommand}", tuple(targets))
-    raise DickError(f"未知 source 子命令：{subcommand}；可选：list / scan / enable / disable")
+    if subcommand == "autorank":
+        if not targets:
+            return Action("source_autorank")  # 只看状态
+        if len(targets) > 1 or targets[0] not in {"enable", "disable"}:
+            raise DickError("source autorank 只接受 enable 或 disable")
+        return Action("source_autorank", (targets[0],))
+    if subcommand == "ranking":
+        if targets:
+            raise DickError("source ranking 不接受参数")
+        return Action("source_ranking")
+    raise DickError(f"未知 source 子命令：{subcommand}；"
+                    "可选：list / scan / enable / disable / autorank / ranking")

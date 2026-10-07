@@ -76,6 +76,8 @@ dick web
 | `dick source scan` | 重新探测仓库 |
 | `dick source enable pacman` | 启用来源 |
 | `dick source disable snap` | 禁用来源 |
+| `dick source autorank [enable\|disable]` | 查看或开关自动来源排序（默认开启） |
+| `dick source ranking` | 关掉自动排序后，用方向键 TUI 手工排安装优先级 |
 | `dick install <包> [--source X]` | 按来源安装，可输入多个 |
 | `dick remove <包> [--deep]` | 扫描本机已安装列表，列出同名/相似名候选后卸载 |
 | `dick list [关键词] [--source X]` | 列出本机已安装的包 |
@@ -111,7 +113,7 @@ Pacman/APT/DNF/APK 搜索不执行 `pacman -Ss`、`apt search`、`dnf search` �
 
 `source enable` / `source disable` 把结果写入配置文件的 `[sources] enabled`，使用外科式编辑，保留其余内容和注释；配置文件或 `[sources]` 段不存在时会创建。禁用后 `search`、`install`、`list`、`update` 都会跳过该来源；显式传入 `--source` 指向已禁用来源会直接报错，并提示运行 `dick source enable`。
 
-`source list` 只读配置，无 `flatpak`、`ll-cli` 或对应原生工具也能运行；`source scan` 才会真正执行原生命令重新探测远端仓库，两者的输出差异就是探测结果。两者都会顺带做一项与仓库无关的检查：Arch 系默认启用 `aur`，而 AUR 自己不会构建包，PATH 里找不到 `paru`/`yay` 时会提示 `没有找到 AUR 助手（paru 或 yay）；装 AUR 包前先装一个，例如：sudo pacman -S paru`（`--json` 下是 `hints` 数组）。
+`source list` 只读配置，无 `flatpak`、`ll-cli` 或对应原生工具也能运行；`source scan` 才会真正执行原生命令重新探测远端仓库，两者的输出差异就是探测结果。两者都会顺带做一项与仓库无关的检查：Arch 系默认启用 `aur`，而 AUR 自己不会构建包，PATH 里找不到 `paru`/`yay` 时会提示 `没有找到 AUR 助手（paru 或 yay）；装 AUR 包前先装一个，例如：sudo pacman -S paru`（`--json` 下是 `hints` 数组）。两者还会打印自动来源排序的当前状态（`--json` 下是 `autorank` 布尔值）。
 
 ## 搜索与缓存
 
@@ -156,7 +158,7 @@ dick remove firefox --source flatpak --yes
 
 ## 安装与降级
 
-Arch 默认 `pacman → aur → flatpak → linyaps → guix → nixpkgs → snap`；Debian 默认 `apt → flatpak → linyaps → guix → nixpkgs → snap`；Fedora 默认 `dnf → flatpak → linyaps → guix → nixpkgs → snap`；Alpine 默认 `apk → flatpak → linyaps → guix → nixpkgs → snap`。**snap 是固定垫底的兜底来源**：不管 `priority.order` 怎么写，它都会被挪到最后一名；配置里漏掉它也会自动补上（体积大、首次启动慢、桌面集成最差，只在其它来源都没有时才用）。手动写了 `[priority.<家族>] order` 的家族只会按列出的顺序降级，新增来源要自己加进去。逐来源查询准确名称，跳过不存在或不可执行的来源；原生命令失败后尝试下一来源。Ctrl+C 或信号退出会停止降级。多包安装逐包处理，结果逐项报告。
+Arch 默认 `pacman → aur → flatpak → linyaps → guix → nixpkgs → snap`；Debian 默认 `apt → flatpak → linyaps → guix → nixpkgs → snap`；Fedora 默认 `dnf → flatpak → linyaps → guix → nixpkgs → snap`；Alpine 默认 `apk → flatpak → linyaps → guix → nixpkgs → snap`。**snap 是固定垫底的兜底来源**：不管 `priority.order` 怎么写，它都会被挪到最后一名；配置里漏掉它也会自动补上（体积大、首次启动慢、桌面集成最差，只在其它来源都没有时才用）。手动写了 `[priority.<家族>] order` 的家族只会按列出的顺序降级，新增来源要自己加进去。逐来源查询准确名称，跳过不存在或不可执行的来源；原生命令失败后尝试下一来源。Ctrl+C 或信号退出会停止降级。多包安装逐包处理，结果逐项报告。除了下面这一条包特征规则，顺序完全由你说了算；不想要它插手，`dick source autorank disable` 关掉即可。
 
 ### 选一个来源不只是排优先级
 
@@ -167,6 +169,19 @@ Arch 默认 `pacman → aur → flatpak → linyaps → guix → nixpkgs → sna
 - **生态协作性**：Electron / Qt WebEngine 一类应用共用运行时——flatpak 上装的 Electron 应用越多，分摊的 `org.freedesktop.Platform` 运行时内存越省；原生源各装各的反而占内存。这类「多装更省」的优势固定优先级表达不了，所以 DICK 只在 IDE / 开发工具这一个有明确技术判据的场景自动干预，其余交给你。
 
 一句话：**固定优先级决定「先试谁」，包的特征决定「谁根本不适合」**。
+
+自动排序默认开启（只有 IDE / 开发工具这一条规则），嫌它插手就关掉换成手工顺序：
+
+```bash
+dick source autorank              # 只看状态
+dick source autorank disable      # 关掉自动排序，写进 [install] autorank = false
+dick source autorank enable       # 再开启
+dick source ranking               # 关掉之后：方向键 TUI，手工排安装优先级
+```
+
+`source ranking` 界面里用 `↑`/`↓`（或 `k`/`j`）移动高亮的来源、Enter 保存、`q` 取消；保存写回 `[priority.<家族>] order`。列表里只出现**本机可用**的来源，不可用的（例如没装 flatpak、没装 nix）保留在配置里并按原相对顺序接在后面，`snap` 依旧恒定垫底。它需要交互式终端，`--json` 只打印可排序的来源列表而不进界面；不想进界面也可以直接编辑配置文件。**自动排序开着时 `source ranking` 会拒绝执行**，先 `dick source autorank disable`——否则「谁先谁后」会有两个主人。
+
+网页的「设置」页同样有「自动来源排序」开关，关掉后会展开一个可拖拽的来源列表（也带 `↑`/`↓` 按钮），「保存顺序」写回同一份配置。
 
 安装失败时 DICK 会认出两类「本地元数据没跟上」，各来源最多自动刷新一次本地元数据再重试同一个命令，省得用户自己开终端：
 
