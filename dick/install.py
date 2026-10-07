@@ -57,6 +57,26 @@ def aur_helper():
     return next((candidate for candidate in AUR_HELPERS if shutil.which(candidate)), None)
 
 
+# 「原生」来源 = 直接装进系统的包管理器；flatpak IDE 降级时排到它们之后。
+NATIVE_SOURCES = ("pacman", "apt", "dnf", "apk")
+
+# AppStream 分类里代表「IDE / 开发工具」的类别。flatpak 的沙箱碰不到系统级工具链
+# （编译器、SDK、容器、shell 环境），IDE 装在 flatpak 里通常会缺这少那，安装时若
+# flatpak 排在原生源前面就自动降级（见 Installer._ordered_sources）。
+DEVELOPMENT_CATEGORIES = {"IDE", "Development"}
+
+
+def is_development_tool(package):
+    """flatpak 包的 AppStream 分类里有 IDE / Development 就算开发工具。"""
+    if package.source != "flatpak" or not package.categories:
+        return False
+    return bool({category.strip() for category in package.categories.split(",")} & DEVELOPMENT_CATEGORIES)
+
+
+SANDBOX_HINT = ("flatpak 的 {name} 是 IDE/开发工具：沙箱里访问不到系统级工具链"
+                "（编译器、SDK、容器），做开发建议用原生源安装。")
+
+
 class Installer:
     def __init__(self, settings, index, report, dry_run=False, yes=False, stream=None, password=None):
         self.settings = settings
@@ -276,11 +296,40 @@ class Installer:
             return ["nix", *NIX_FLAKE_FLAGS, "profile", "install", f"nixpkgs#{name}"]
         raise DickError(f"不支持安装来源：{source}")
 
+    def _ordered_sources(self, target, sources):
+        """安装尝试顺序；若 flatpak 的候选是 IDE/开发工具且前面还有原生源，自动降级。
+
+        flatpak 的沙箱访问不到系统级工具链，IDE 装进去往往缺编译器/SDK/容器。用户把
+        flatpak 排在原生源之前时，这里先把 flatpak 挪到最后一个原生源之后再试（snap
+        恒在最后，不受影响）。预扫描只在「flatpak 在序、可用、且原生源也参与」时才做，
+        免得默认顺序（pacman 在前）下白跑一次 flatpak 搜索。
+        """
+        order = [source for source in self.settings.priority if source in sources]
+        order.extend(source for source in sources if source not in order)
+        if "flatpak" not in order or not self.settings.available("flatpak"):
+            return order, None
+        flatpak_at = order.index("flatpak")
+        natives = [source for source in order if source in NATIVE_SOURCES]
+        if not natives or order.index(natives[-1]) < flatpak_at:
+            return order, None  # 原生源本来就在 flatpak 前面（或没有原生源），无需降级
+        try:
+            packages, _failures = self.index.search(target, ["flatpak"], exact=True)
+        except DickError:
+            return order, None  # 索引出了问题就按原顺序装，别把安装堵死
+        if len({package.name for package in packages}) != 1 or not is_development_tool(packages[0]):
+            return order, None
+        self.report(f"{target} 在 flatpak 里是 IDE/开发工具（{packages[0].name}），"
+                    "沙箱里访问不到系统级工具链（编译器、SDK、容器），"
+                    "已把 flatpak 排到原生源之后尝试。")
+        order.remove("flatpak")
+        # 插到最后一个原生源之后；snap 恒在末尾（config 层已保证），这里的插入不会越过它。
+        order.insert(max(order.index(source) for source in natives if source in order) + 1, "flatpak")
+        return order, packages[0]
+
     def install(self, target, sources):
         attempts = []
         refreshed = set()
-        source_order = [source for source in self.settings.priority if source in sources]
-        source_order.extend(source for source in sources if source not in source_order)
+        source_order, flatpak_ide = self._ordered_sources(target, sources)
         for source in source_order:
             if not self.settings.available(source):
                 attempts.append({"source": source, "error": "原生管理器不可用"})
@@ -292,6 +341,11 @@ class Installer:
             try:
                 if len({package.name for package in packages}) > 1:
                     raise DickError("名称匹配多个应用，请使用完整 ID：" + ", ".join(sorted({package.name for package in packages})))
+                if source == "flatpak" and is_development_tool(packages[0]):
+                    # 预扫描已经报过降级原因的（flatpak_ide 是同一个包）就不重复；
+                    # 默认顺序走到这里说明原生源已经失败过了，再提醒一次沙箱的局限。
+                    if not flatpak_ide:
+                        self.report(SANDBOX_HINT.format(name=packages[0].name))
                 command = self.install_command(packages[0])
                 code = self.execute(command)
                 stale = self.looks_like_stale_index()

@@ -7,7 +7,7 @@ from .cache import Cache
 from .config import SOURCES, Settings
 from .discovery import discover
 from .index import Index
-from .install import AUR_HELPER_HINT, Installer, aur_helper
+from .install import AUR_HELPER_HINT, Installer, aur_helper, is_development_tool
 from .local import matches, rank, read_installed
 from .models import DickError
 from .network import HTTPClient
@@ -31,6 +31,8 @@ def print_packages(packages):
     for package in packages:
         description = " ".join(package.description.split())
         print(f"[{package.source}/{package.repository}] {package.name} {package.version}\n  {description}")
+        if is_development_tool(package):
+            print("  ⚠ IDE/开发工具：flatpak 沙箱访问不到系统级工具链（编译器、SDK、容器），做开发建议用原生源安装。")
 
 
 def check_enabled(settings, args, action):

@@ -750,6 +750,12 @@ function sortedPackages() {
   return list;
 }
 
+function isDevTool(pkg) {
+  if (pkg.source !== 'flatpak') return false;
+  const categories = (pkg.categories || '').split(',').map((item) => item.trim());
+  return categories.includes('IDE') || categories.includes('Development');
+}
+
 function packageCard(pkg) {
   const node = $('#tpl-package').content.firstElementChild.cloneNode(true);
   node.dataset.key = `${pkg.source}|${pkg.name}`;
@@ -766,6 +772,7 @@ function packageCard(pkg) {
   if (pkg.repository) meta.append(el('span', { class: 'badge', text: pkg.repository }));
   if (pkg.architecture) meta.append(el('span', { class: 'badge', text: pkg.architecture }));
   if (pkg.installed) meta.append(el('span', { class: 'badge ok', text: '已安装' }));
+  if (isDevTool(pkg)) meta.append(el('span', { class: 'badge warn', text: '⚠ IDE/开发工具', title: 'flatpak 沙箱访问不到系统级工具链（编译器、SDK、容器），做开发建议用原生源安装。' }));
 
   const actions = $('.pkg-actions', node);
   actions.append(el('button', { class: 'btn', text: '详情', onclick: () => openDetail(pkg) }));
@@ -848,6 +855,7 @@ async function openDetail(pkg) {
       query: {
         source: pkg.source, name: pkg.name, version: pkg.version,
         description: pkg.description, repository: pkg.repository, architecture: pkg.architecture,
+        categories: pkg.categories || '',
       },
     });
     detail.tagline = pkg.tagline || '';
@@ -870,6 +878,7 @@ function renderDetail(detail) {
       detail.repository ? el('span', { class: 'badge', text: detail.repository }) : null,
       detail.architecture ? el('span', { class: 'badge', text: detail.architecture }) : null,
       detail.installed ? el('span', { class: 'badge ok', text: '已安装' }) : null,
+      isDevTool(detail) ? el('span', { class: 'badge warn', text: '⚠ IDE/开发工具' }) : null,
     ]),
     el('div', { class: 'hero-actions' }, [
       detail.installed
@@ -917,6 +926,13 @@ function renderDetail(detail) {
   }
   sections.push(descriptionSection);
 
+  if (isDevTool(detail)) {
+    sections.push(el('section', { class: 'drawer-section' }, [
+      el('h3', { text: '来源提醒' }),
+      el('p', { class: 'drawer-desc', text: '这是 IDE/开发工具：flatpak 沙箱里访问不到系统级工具链（编译器、SDK、容器），做开发建议用原生源（pacman/apt/dnf/apk）安装；命令行 `dick install` 多来源安装时也会自动把 flatpak 排到原生源之后。' }),
+    ]));
+  }
+
   if (detail.install_command) {
     sections.push(el('section', { class: 'drawer-section' }, [
       el('h3', { text: '安装命令' }),
@@ -939,6 +955,7 @@ function renderDetail(detail) {
   if (detail.version) rows.push(['版本', detail.version]);
   if (detail.repository) rows.push(['仓库', detail.repository]);
   if (detail.architecture) rows.push(['架构', detail.architecture]);
+  if (detail.categories) rows.push(['分类', detail.categories]);
   const dl = el('dl', { class: 'kv' });
   for (const [key, value] of rows) dl.append(el('dt', { text: key }), el('dd', { text: value }));
   sections.push(el('section', { class: 'drawer-section' }, [el('h3', { text: '信息' }), dl]));

@@ -16,6 +16,7 @@ class Cache:
             CREATE TABLE IF NOT EXISTS packages (
                 name TEXT NOT NULL, source TEXT NOT NULL, description TEXT NOT NULL,
                 version TEXT NOT NULL, repository TEXT NOT NULL, architecture TEXT NOT NULL,
+                categories TEXT NOT NULL DEFAULT '',
                 PRIMARY KEY (source, repository, name, architecture)
             );
             CREATE INDEX IF NOT EXISTS packages_name ON packages(name COLLATE NOCASE);
@@ -28,6 +29,11 @@ class Cache:
                 payload TEXT NOT NULL, PRIMARY KEY (source, query)
             );
         """)
+        # 旧库升级：v0.1 之前的 packages 表没有 categories 列（flatpak 的 IDE/开发标记）。
+        try:
+            self.connection.execute("ALTER TABLE packages ADD COLUMN categories TEXT NOT NULL DEFAULT ''")
+        except sqlite3.OperationalError:
+            pass
 
     def close(self):
         with self.lock:
@@ -37,9 +43,10 @@ class Cache:
         with self.lock, self.connection:
             self.connection.execute("DELETE FROM packages WHERE source=? AND repository=?",
                                     (repository.source, repository.name))
-            self.connection.executemany("INSERT OR REPLACE INTO packages VALUES (?, ?, ?, ?, ?, ?)",
+            self.connection.executemany("INSERT OR REPLACE INTO packages VALUES (?, ?, ?, ?, ?, ?, ?)",
                                         ((package.name, package.source, package.description, package.version,
-                                          package.repository, package.architecture) for package in packages))
+                                          package.repository, package.architecture, package.categories)
+                                         for package in packages))
             count = self.connection.execute("SELECT COUNT(*) FROM packages WHERE source=? AND repository=?",
                                             (repository.source, repository.name)).fetchone()[0]
             self.connection.execute("INSERT OR REPLACE INTO snapshots VALUES (?, ?, ?, ?)",
@@ -57,7 +64,7 @@ class Cache:
             clause, parameters = "(name LIKE ? ESCAPE '\\' OR description LIKE ? ESCAPE '\\')", [pattern, pattern]
         with self.lock:
             rows = self.connection.execute(
-                f"SELECT name,source,description,version,repository,architecture FROM packages "
+                f"SELECT name,source,description,version,repository,architecture,categories FROM packages "
                 f"WHERE {clause} AND source IN ({placeholders}) ORDER BY name,source,repository",
                 [*parameters, *sources],
             )

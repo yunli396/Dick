@@ -179,13 +179,16 @@ def appstream_metadata(content):
 
     同一个 name/summary 会有一串 xml:lang 译文，只认不带 lang 的源语言版本，结果才不会随
     构建机的语言变化；实在没有源语言条目才退回第一条译文。
+
+    categories 也从这里带出来（IDE / Development 用来识别开发工具，见 install.py）。
     """
     metadata = {}
     for _event, component in ET.iterparse(io.BytesIO(content), events=("end",)):
         if component.tag.rsplit("}", 1)[-1] != "component":
             continue
-        fields = {"name": "", "summary": "", "version": ""}
+        fields = {"name": "", "summary": "", "version": "", "categories": ""}
         fallback = {}
+        categories = []
         component_id = ""
         for child in component:
             tag = child.tag.rsplit("}", 1)[-1]
@@ -201,9 +204,17 @@ def appstream_metadata(content):
                     fields[tag] = fields[tag] or text
             elif tag == "releases":
                 fields["version"] = _appstream_version(child)
+            elif tag == "categories":
+                for category in child:
+                    if category.tag.rsplit("}", 1)[-1] != "category":
+                        continue
+                    text = " ".join((category.text or "").split())
+                    if text and text not in categories:
+                        categories.append(text)
         if component_id:
             for tag in ("name", "summary"):
                 fields[tag] = fields[tag] or fallback.get(tag, "")
+            fields["categories"] = ",".join(categories)
             metadata.setdefault(component_id, fields)
         component.clear()
     return metadata

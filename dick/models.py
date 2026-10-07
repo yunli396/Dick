@@ -13,6 +13,7 @@ class Package:
     version: str = ""
     repository: str = ""
     architecture: str = ""
+    categories: str = ""
 
     def to_dict(self):
         return asdict(self)

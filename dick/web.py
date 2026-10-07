@@ -654,7 +654,8 @@ class WebApp:
         if not name:
             raise DickError("package 需要 name 参数")
         record = Package(name, source, query.get("description", ""), query.get("version", ""),
-                         query.get("repository", ""), query.get("architecture", ""))
+                         query.get("repository", ""), query.get("architecture", ""),
+                         query.get("categories", ""))
         detail = record.to_dict()
         detail["icon"] = f"/api/icon?source={source}&name={name}"
         detail["installed"] = (source, name.casefold()) in self.installed_keys([source])

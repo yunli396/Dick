@@ -218,7 +218,7 @@ class Index:
                 continue
             enriched.append(Package(package.name, "flatpak", fields["summary"] or package.description,
                                     fields["version"] or package.version, repository.name,
-                                    package.architecture))
+                                    package.architecture, fields["categories"]))
         return enriched
 
     def refresh_repository(self, repository, metadata=True):

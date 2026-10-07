@@ -94,7 +94,7 @@ dick web
 | --- | --- | --- | --- | --- |
 | Pacman | `pacman.conf` 和递归 `Include` 中的 `Server` → `.db` | `pacman -Qn` / `pacman -R [-Rns]` | `pacman -S repo/name` | 首要链路，多镜像失败自动切换，zstd/gzip/xz/bzip2/未压缩 tar |
 | AUR | 官方 RPC v5 的 search/info | `pacman -Qm` / `pacman -R [-Rns]` | `paru` 或 `yay` | Arch 上按需查询，默认缓存 15 分钟；不自行下载或构建 PKGBUILD。DICK 只负责准备 `paru -S aur/名称` 这样的命令；PATH 里没有 `paru`/`yay` 时 `dick source list\|scan` 会提示 `sudo pacman -S paru` |
-| Flatpak | `flatpak remotes`、`flatpak remote-ls --json`（老版本退回 TSV）+ 远程仓库自己的 AppStream | `flatpak list --app` / `flatpak uninstall` | `flatpak install remote ID` | 远端的应用，默认 Flatpak 安装作用域；用的就是 `flatpak remotes` 列出的**你自己的**远程和镜像，`remote-ls` 不给描述与版本，所以 `dick update --source flatpak` 会再拉一份远程的 AppStream 目录（`appstream/<架构>/appstream.xml.gz`，约 10 MB，压缩包按天缓存在缓存目录的 `appstream/` 下，搜索不会触发下载）补齐描述与版本；远程地址取不到这份数据时会跟着仓库 `config` 里的 `redirect-url` 换到官方站点（中科大这类只镜像仓库内容的镜像是如此），两边都没有才退回只显示包名 |
+| Flatpak | `flatpak remotes`、`flatpak remote-ls --json`（老版本退回 TSV）+ 远程仓库自己的 AppStream | `flatpak list --app` / `flatpak uninstall` | `flatpak install remote ID` | 远端的应用，默认 Flatpak 安装作用域；用的就是 `flatpak remotes` 列出的**你自己的**远程和镜像，`remote-ls` 不给描述与版本，所以 `dick update --source flatpak` 会再拉一份远程的 AppStream 目录（`appstream/<架构>/appstream.xml.gz`，约 10 MB，压缩包按天缓存在缓存目录的 `appstream/` 下，搜索不会触发下载）补齐描述、版本与分类；远程地址取不到这份数据时会跟着仓库 `config` 里的 `redirect-url` 换到官方站点（中科大这类只镜像仓库内容的镜像是如此），两边都没有才退回只显示包名。分类里带 `IDE`/`Development` 的应用在安装时会被自动降级（见「选一个来源不只是排优先级」） |
 | APT | `.list` / Deb822 `.sources` → 各组件与架构的 `Packages` | `dpkg-query -W` / `apt-get remove\|purge` | `apt-get install` | 基础实现，xz/gzip/未压缩索引、平铺仓库、多文件合并 |
 | DNF | `.repo` → `repomd.xml` → primary XML | `rpm -qa` / `dnf remove` | `dnf install` | 基础实现，baseurl/mirrorlist/metalink、元数据 checksum、架构筛选 |
 | APK（Alpine） | `/etc/apk/repositories` → `{架构}/APKINDEX.tar.gz` 内的 `APKINDEX` | `/lib/apk/db/installed` / `apk del` | `apk add --no-cache` | Alpine 原生索引，解析单字母字段（`P`/`V`/`T`/`A`）；`@tag` 标记会被忽略，仓库名取 URL 末两段（`v3.20/main`） |
@@ -157,6 +157,16 @@ dick remove firefox --source flatpak --yes
 ## 安装与降级
 
 Arch 默认 `pacman → aur → flatpak → linyaps → guix → nixpkgs → snap`；Debian 默认 `apt → flatpak → linyaps → guix → nixpkgs → snap`；Fedora 默认 `dnf → flatpak → linyaps → guix → nixpkgs → snap`；Alpine 默认 `apk → flatpak → linyaps → guix → nixpkgs → snap`。**snap 是固定垫底的兜底来源**：不管 `priority.order` 怎么写，它都会被挪到最后一名；配置里漏掉它也会自动补上（体积大、首次启动慢、桌面集成最差，只在其它来源都没有时才用）。手动写了 `[priority.<家族>] order` 的家族只会按列出的顺序降级，新增来源要自己加进去。逐来源查询准确名称，跳过不存在或不可执行的来源；原生命令失败后尝试下一来源。Ctrl+C 或信号退出会停止降级。多包安装逐包处理，结果逐项报告。
+
+### 选一个来源不只是排优先级
+
+固定优先级只是默认值，真正选源要综合三个维度，DICK 会据此自动调整：
+
+- **使用便利度**：flatpak 沙箱里的 IDE / 开发工具访问不到系统级的工具链（编译器、SDK、容器、shell 环境），做开发基本不可用。所以 `dick install code` 这类多来源安装里，**flatpak 的 IDE / 开发类应用（AppStream 分类含 `IDE` 或 `Development`）会自动降到原生源（pacman/apt/dnf/apk）之后**再尝试，并提示原因；网页搜索结果和详情页也会打上「⚠ IDE/开发工具」标记。原生源都失败后才轮到它时，不再降级（没得降），但同样提醒一句。
+- **安装与更新便利度**：AUR 要先装 `paru`/`yay`，编译安装慢、更新跟随助手的习惯；flatpak 一条命令装完、由系统自动后台更新。默认顺序里 AUR 排在 flatpak 前，但你可以用 `[priority.arch] order = ["pacman", "flatpak", "aur", …]` 按自己口味调。
+- **生态协作性**：Electron / Qt WebEngine 一类应用共用运行时——flatpak 上装的 Electron 应用越多，分摊的 `org.freedesktop.Platform` 运行时内存越省；原生源各装各的反而占内存。这类「多装更省」的优势固定优先级表达不了，所以 DICK 只在 IDE / 开发工具这一个有明确技术判据的场景自动干预，其余交给你。
+
+一句话：**固定优先级决定「先试谁」，包的特征决定「谁根本不适合」**。
 
 安装失败时 DICK 会认出两类「本地元数据没跟上」，各来源最多自动刷新一次本地元数据再重试同一个命令，省得用户自己开终端：
 

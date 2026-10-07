@@ -326,9 +326,35 @@ class ParserTests(unittest.TestCase):
         metadata = appstream_metadata(xml)
         self.assertEqual(metadata["org.mozilla.firefox"],
                          {"name": "Firefox", "summary": "Fast, Private & Safe Web Browser",
-                          "version": "157.0.1"})
+                          "version": "157.0.1", "categories": ""})
         # 通篇没有源语言时，退回第一条译文总比空着好
         self.assertEqual(metadata["org.gnome.Calculator"]["name"], "計算機")
+
+    def test_appstream_metadata_collects_categories(self):
+        """分类用于安装时的选源判断（flatpak IDE/开发工具要降级）。"""
+        xml = b"""<?xml version="1.0" encoding="UTF-8"?>
+<components>
+  <component type="desktop-application">
+    <id>com.visualstudio.code</id>
+    <name>Visual Studio Code</name>
+    <summary>Code editing. Redefined.</summary>
+    <categories>
+      <category>TextEditor</category>
+      <category> Development </category>
+      <category>Development</category>
+      <category>IDE</category>
+    </categories>
+  </component>
+  <component type="desktop-application">
+    <id>org.videolan.VLC</id>
+    <name>VLC</name>
+    <categories><category>AudioVideo</category></categories>
+  </component>
+</components>"""
+        metadata = appstream_metadata(xml)
+        # 去空白、去重保序；IDE/Development 是开发工具，AudioVideo 不是
+        self.assertEqual(metadata["com.visualstudio.code"]["categories"], "TextEditor,Development,IDE")
+        self.assertEqual(metadata["org.videolan.VLC"]["categories"], "AudioVideo")
 
     def test_expansion_and_zstd_limits(self):
         if zstd is None:
@@ -356,6 +382,21 @@ class CacheTests(FixtureTest):
             self.cache.replace(repository, broken_packages())
         self.assertEqual(self.cache.search("firefox", ["pacman"]), [original])
         self.assertEqual(self.cache.snapshot(repository), snapshot)
+
+    def test_old_database_without_categories_is_migrated(self):
+        """旧库没有 categories 列：打开时自动 ALTER，不要求用户删缓存重建。"""
+        legacy = Package("firefox", "pacman", "web browser", "1", "extra")
+        self.cache.replace(Repository("pacman", "extra", ()), [legacy])
+        with self.cache.lock:
+            self.cache.connection.execute("ALTER TABLE packages DROP COLUMN categories")
+        self.cache.close()
+        reopened = Cache(self.settings.cache_dir)        # 这一步应当把列补回来
+        packages = reopened.search("firefox", ["pacman"])
+        self.assertEqual(len(packages), 1)
+        self.assertEqual(packages[0].categories, "")
+        reopened.replace(Repository("pacman", "extra", ()), [legacy])   # 新写入路径也要能用
+        self.assertEqual(reopened.search("firefox", ["pacman"])[0].version, "1")
+        reopened.close()
 
     def test_search_wildcards_are_literal(self):
         repository = Repository("apt", "main", ())
@@ -516,7 +557,26 @@ class IndexTests(FixtureTest):
     <id>org.mozilla.firefox</id>
     <name>Firefox</name>
     <summary>Fast, Private &amp; Safe Web Browser</summary>
+    <categories>
+      <category>Network</category>
+      <category>WebBrowser</category>
+    </categories>
     <releases><release version="157.0.1" date="2025-06-01"/></releases>
+  </component>
+</components>"""
+
+    APPSTREAM_IDE = b"""<?xml version="1.0" encoding="UTF-8"?>
+<components>
+  <component type="desktop-application">
+    <id>com.visualstudio.code</id>
+    <name>Visual Studio Code</name>
+    <summary>Code editing. Redefined.</summary>
+    <categories>
+      <category>TextEditor</category>
+      <category>Development</category>
+      <category>IDE</category>
+    </categories>
+    <releases><release version="1.139.1" date="2025-09-01"/></releases>
   </component>
 </components>"""
 
@@ -542,6 +602,7 @@ class IndexTests(FixtureTest):
         self.assertFalse(errors)
         self.assertEqual(packages[0].description, "Fast, Private & Safe Web Browser")
         self.assertEqual(packages[0].version, "157.0.1")
+        self.assertEqual(packages[0].categories, "Network,WebBrowser")
         self.assertEqual(client.get.call_args.args[0],
                          "https://mirror.example/flathub/appstream/x86_64/appstream.xml.gz")
         self.assertTrue((self.settings.cache_dir / "appstream" / "flatpak-flathub.xml.gz").exists())
@@ -2750,6 +2811,74 @@ class PasswordPrivilegeTests(FixtureTest):
         result = installer.install("htop", ["snap", "pacman", "aur"])
         self.assertEqual(tried, ["pacman", "aur", "snap"])
         self.assertFalse(result["success"])
+
+    def ide_index(self, priority_order):
+        """flatpak 里有 IDE 分类包的安装环境：settings/index 都按需打桩。"""
+        path = self.write("etc/ide-first.toml", f'[priority.arch]\norder = {priority_order}\n')
+        settings = Settings(config_path=path, root=self.root, cache_dir=self.root / "ide-cache")
+        settings.available = lambda source: True
+        index = Mock()
+        index.search = Mock(side_effect=lambda target, sources, exact: (
+            [Package(target if sources[0] != "flatpak" else "com.visualstudio.code",
+                     sources[0], categories="TextEditor,Development,IDE" if sources[0] == "flatpak" else "")],
+            []))
+        return settings, index
+
+    def test_install_demotes_flatpak_ide_behind_native_sources(self):
+        """flatpak 排在原生源前面且目标是 IDE：自动降到原生源之后，并说明原因。"""
+        settings, index = self.ide_index('["flatpak", "pacman", "aur"]')
+        self.assertEqual(settings.priority, ["flatpak", "pacman", "aur", "snap"])  # snap 恒垫底
+        lines = []
+        installer = Installer(settings, index, lines.append, dry_run=False, yes=True)
+        installer.install_command = lambda package: ["echo", package.source]
+        tried = []
+
+        def execute(command):
+            tried.append(command[-1])
+            return 1
+
+        installer.execute = execute
+        result = installer.install("code", ["flatpak", "pacman", "aur"])
+        self.assertEqual(tried, ["pacman", "flatpak", "aur"])
+        self.assertFalse(result["success"])
+        self.assertTrue(any("IDE/开发工具" in line for line in lines))
+        self.assertTrue(any("排到原生源之后" in line for line in lines))
+
+    def test_install_does_not_demote_flatpak_when_native_sources_lead(self):
+        """默认顺序原生源本来就在前：不预扫、不降级、不重复提示。"""
+        settings, index = self.ide_index('["pacman", "aur", "flatpak"]')
+        lines = []
+        installer = Installer(settings, index, lines.append, dry_run=False, yes=True)
+        installer.install_command = lambda package: ["echo", package.source]
+        tried = []
+
+        def execute(command):
+            tried.append(command[-1])
+            return 0  # pacman 第一个就成功
+
+        installer.execute = execute
+        result = installer.install("code", ["pacman", "aur", "flatpak"])
+        self.assertEqual(tried, ["pacman"])
+        self.assertTrue(result["success"])
+        self.assertFalse([line for line in lines if "IDE/开发工具" in line])
+
+    def test_install_warns_when_default_order_falls_back_to_flatpak_ide(self):
+        """原生源都失败后才轮到 flatpak IDE：不再降级（没得降），但要提醒一句。"""
+        settings, index = self.ide_index('["pacman", "flatpak"]')
+        lines = []
+        installer = Installer(settings, index, lines.append, dry_run=False, yes=True)
+        installer.install_command = lambda package: ["echo", package.source]
+        tried = []
+
+        def execute(command):
+            tried.append(command[-1])
+            return 1
+
+        installer.execute = execute
+        result = installer.install("code", ["pacman", "flatpak"])
+        self.assertEqual(tried, ["pacman", "flatpak"])
+        self.assertFalse(result["success"])
+        self.assertTrue(any("做开发建议用原生源" in line for line in lines))
 
     def test_stale_index_detection_matches_real_manager_output(self):
         """pacman/apt 索引过期时的报错都要能认出来；普通冲突等失败不能误判成过期。"""
