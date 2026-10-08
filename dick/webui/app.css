@@ -139,9 +139,6 @@ code { font-size: 0.88em; background: var(--bg-sunk); padding: 1px 5px; border-r
 .nav-item.is-active { background: var(--accent-soft); color: var(--ink); font-weight: 500; }
 .nav-icon { width: 18px; text-align: center; color: var(--accent-strong); }
 
-.side-section { display: flex; flex-direction: column; gap: 8px; min-height: 0; }
-.side-head { display: flex; align-items: center; justify-content: space-between; padding: 0 6px; }
-.side-head h2 { font-family: var(--sans); font-size: 11px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--ink-3); }
 .link {
   border: 0; background: none; padding: 0; cursor: pointer;
   color: var(--accent-strong); font: inherit; font-size: 12.5px;
@@ -480,15 +477,14 @@ code { font-size: 0.88em; background: var(--bg-sunk); padding: 1px 5px; border-r
   .main { padding: 20px 18px 80px; }
 }
 @media (max-width: 620px) {
-  /* 手机：侧栏压成一条横向导航，别让五个导航项加来源列表把内容挤到第一屏外面 */
+  /* 手机：侧栏压成一条横向导航，别让五个导航项把内容挤到第一屏外面 */
   .sidebar { padding: 14px 14px 12px; gap: 12px; }
   .brand { padding: 0; }
   .nav { flex-direction: row; gap: 6px; overflow-x: auto; padding-bottom: 2px; scrollbar-width: none; }
   .nav::-webkit-scrollbar { display: none; }
   .nav-item { flex: 0 0 auto; padding: 7px 11px; font-size: 13.5px; white-space: nowrap; }
   .nav-icon { width: auto; }
-  .side-section { gap: 4px; }
-  .source-list { max-height: 116px; }
+  .source-list { max-height: none; }
   .side-foot { margin-top: 0; }
   h1 { font-size: 24px; }
   .grid { grid-template-columns: 1fr; }

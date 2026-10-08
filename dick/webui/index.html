@@ -37,14 +37,6 @@
       </button>
     </nav>
 
-    <div class="side-section">
-      <div class="side-head">
-        <h2>来源</h2>
-        <button class="link" id="scanSources" title="重新探测各来源的原生仓库">扫描</button>
-      </div>
-      <ul class="source-list" id="sourceList"></ul>
-    </div>
-
     <div class="side-foot">
       <div class="row-between">
         <span id="familyLabel">—</span>
@@ -190,8 +182,11 @@
           <p class="muted small">也支持环境变量 <code>DICK_AI_API_KEY</code>、<code>DICK_AI_BASE_URL</code>、<code>DICK_AI_MODEL</code>、<code>DICK_AI_TARGET</code>。</p>
         </article>
         <article class="card">
-          <h2>来源启用</h2>
-          <p class="muted">禁用的来源会在搜索、安装、更新与列表里全部跳过。</p>
+          <div class="row-between">
+            <h2>来源启用</h2>
+            <button class="link" id="scanSources" title="重新探测各来源的原生仓库">重新扫描</button>
+          </div>
+          <p class="muted">禁用的来源会在搜索、安装、更新与列表里全部跳过；原生管理器不可用的来源，启用后也要等装好它才生效。改完立刻写回配置文件。</p>
           <ul class="source-list large" id="settingsSources"></ul>
         </article>
         <article class="card">

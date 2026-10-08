@@ -91,8 +91,17 @@ def run_autorank(settings, action, args):
     return 0
 
 
+# 终端发来的转义序列（CSI / SS3）到按键名的映射。带修饰键的箭头是 CSI 1;2A 这种形式，
+# 所以不能只看最后两个字节。
+SEQUENCE_KEYS = {
+    "[A": "up", "[B": "down", "[C": "right", "[D": "left",
+    "OA": "up", "OB": "down", "OC": "right", "OD": "left",
+    "[1;2A": "shift-up", "[1;2B": "shift-down",
+}
+
+
 def read_key(descriptor):
-    """读一个按键，把方向键的转义序列还原成 up / down / escape。
+    """读一个按键，把转义序列还原成 up / down / shift-up 这类按键名。
 
     直接读文件描述符（而不是 sys.stdin）是必要的：raw 模式下 STDIN 已经禁用了行缓冲，
     但 Python 的文本层还会自己预读，真用 sys.stdin.read 的话转义序列的后续字节会留在
@@ -102,23 +111,55 @@ def read_key(descriptor):
     if character != "\x1b":
         return character
     sequence = b""
-    while len(sequence) < 2 and select.select([descriptor], [], [], 0.05)[0]:
+    while len(sequence) < 8 and select.select([descriptor], [], [], 0.05)[0]:
         sequence += os.read(descriptor, 1)
+        if sequence[:1] == b"[":  # CSI：一直读到结束字节（0x40-0x7e）
+            if len(sequence) > 1 and 0x40 <= sequence[-1] <= 0x7E:
+                break
+        elif sequence[:1] == b"O":  # SS3：ESC O 后面只跟一个字节
+            if len(sequence) > 1:
+                break
+        else:  # Esc 后面不是 CSI / SS3（Alt+字母之类）：就此打住
+            break
     if not sequence:
         return "escape"  # 单独的 Esc：用户按的是取消，不是方向键
-    suffix = sequence.decode("utf-8", "ignore")
-    if suffix.startswith("["):
-        return {"[A": "up", "[B": "down", "[C": "right", "[D": "left"}.get(suffix, "escape")
-    return "escape"
+    return SEQUENCE_KEYS.get(sequence.decode("utf-8", "ignore"), "escape")
+
+
+def ranking_key(order, position, key):
+    """处理一次按键，返回 (来源顺序, 高亮位置, 动作)；动作是 None / "save" / "cancel"。
+
+    方向键只挪高亮，挪来源是另外的键（J/K 或 Shift+↑/↓）。两者分开才不会出现
+    「按住 ↓ 永远在搬同一个来源、想去碰别的却够不着」这种使不上劲的手感。
+    """
+    last = len(order) - 1
+    if key in {"down", "j"}:
+        return order, min(position + 1, last), None
+    if key in {"up", "k"}:
+        return order, max(position - 1, 0), None
+    if key in {"J", "shift-down"} and position < last:
+        order[position], order[position + 1] = order[position + 1], order[position]
+        return order, position + 1, None
+    if key in {"K", "shift-up"} and position > 0:
+        order[position], order[position - 1] = order[position - 1], order[position]
+        return order, position - 1, None
+    if key in {"\r", "\n"}:
+        return order, position, "save"
+    if key in {"q", "escape", "\x03"}:
+        return order, position, "cancel"
+    return order, position, None
 
 
 def draw_ranking(order, position):
     """重排界面：清屏重画，免去记行数和处理 raw 模式下的换行。"""
-    lines = ["用 ↑/↓（或 k/j）上下移动高亮的来源，Enter 保存，q 取消：", ""]
+    lines = [
+        "↑/↓（或 k/j）移动高亮，J / K（或 Shift+↑/↓）把高亮的来源上下挪，Enter 保存，q 取消：",
+        "",
+    ]
     for index, source in enumerate(order):
         lines.append(f" {'▶' if index == position else ' '} {index + 1}. {source}")
     lines.append("")
-    lines.append("不可用的来源不在此列表；它们会保留在配置里，排在最后（snap 恒垫底）。")
+    lines.append("只有本机可用的来源列在这里；不可用的来源会保留在配置里、排在最后（snap 恒垫底）。")
     sys.stdout.write("\x1b[2J\x1b[H" + "\r\n".join(lines) + "\r\n")
     sys.stdout.flush()
 
@@ -138,18 +179,10 @@ def rank_sources(sources):
         tty.setraw(descriptor)
         while True:
             draw_ranking(order, position)
-            key = read_key(descriptor)
-            if key in {"down", "j"}:
-                if position < len(order) - 1:
-                    order[position], order[position + 1] = order[position + 1], order[position]
-                    position += 1
-            elif key in {"up", "k"}:
-                if position > 0:
-                    order[position], order[position - 1] = order[position - 1], order[position]
-                    position -= 1
-            elif key in {"\r", "\n", " "}:
+            order, position, action = ranking_key(order, position, read_key(descriptor))
+            if action == "save":
                 return order
-            elif key in {"q", "escape", "\x03"}:
+            if action == "cancel":
                 return None
     finally:
         termios.tcsetattr(descriptor, termios.TCSADRAIN, saved)

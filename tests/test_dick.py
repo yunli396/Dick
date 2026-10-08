@@ -30,7 +30,7 @@ except ImportError:
 from dick import catalog, selfmanage
 from dick.ai import Translator, endpoint
 from dick.cache import Cache
-from dick.cli import choose_candidates, main
+from dick.cli import choose_candidates, main, ranking_key, read_key
 from dick.config import LAST_SOURCE, PRIORITIES, SOURCES, Settings
 from dick.discovery import apk_repositories, apt_repositories, discover, dnf_repositories, pacman_repositories
 from dick.index import Index
@@ -1436,6 +1436,59 @@ class InstallationTests(FixtureTest):
         self.assertEqual(run.call_args_list[1].args[0], ["ll-cli", "install", "org.mozilla.firefox"])
 
 
+class RankingKeyTests(unittest.TestCase):
+    """方向键挪高亮、J/K（或 Shift+↑/↓）挪来源——两件事分开，才不会按着 ↓ 一直搬同一个来源。"""
+
+    def test_arrows_only_move_the_highlight(self):
+        order = ["a", "b", "c"]
+        self.assertEqual(ranking_key(list(order), 0, "down"), (order, 1, None))
+        self.assertEqual(ranking_key(list(order), 1, "j"), (order, 2, None))
+        self.assertEqual(ranking_key(list(order), 2, "down"), (order, 2, None))  # 到底停住
+        self.assertEqual(ranking_key(list(order), 1, "k"), (order, 0, None))
+        self.assertEqual(ranking_key(list(order), 0, "up"), (order, 0, None))
+        self.assertEqual(ranking_key(list(order), 0, "right")[0], order)  # 左右键不动顺序
+
+    def test_shift_and_capital_letters_move_the_highlighted_source(self):
+        order, position, action = ranking_key(["a", "b", "c"], 0, "J")
+        self.assertEqual((order, position, action), (["b", "a", "c"], 1, None))
+        order, position, _ = ranking_key(order, position, "J")
+        self.assertEqual((order, position), (["b", "c", "a"], 2))
+        self.assertEqual(ranking_key(order, 2, "J"), (order, 2, None))  # 到底停住
+        order, position, _ = ranking_key(order, 2, "K")
+        self.assertEqual((order, position), (["b", "a", "c"], 1))
+        self.assertEqual(ranking_key(order, 1, "shift-up"), (["a", "b", "c"], 0, None))
+        self.assertEqual(ranking_key(["a", "b"], 0, "shift-down"), (["b", "a"], 1, None))
+        self.assertEqual(ranking_key(["a", "b"], 0, "K"), (["a", "b"], 0, None))  # 到顶停住
+
+    def test_enter_saves_q_cancels_and_the_rest_is_ignored(self):
+        for key in ("\r", "\n"):
+            self.assertEqual(ranking_key(["a"], 0, key)[2], "save")
+        for key in ("q", "escape", "\x03"):
+            self.assertEqual(ranking_key(["a"], 0, key)[2], "cancel")
+        for key in (" ", "x", "left"):
+            self.assertEqual(ranking_key(["a", "b"], 1, key), (["a", "b"], 1, None))
+
+    def test_read_key_decodes_terminal_sequences(self):
+        def decode(payload):
+            read, write = os.pipe()
+            try:
+                os.write(write, payload)
+                return read_key(read)
+            finally:
+                os.close(read)
+                os.close(write)
+
+        self.assertEqual(decode(b"\x1b[B"), "down")
+        self.assertEqual(decode(b"\x1b[A"), "up")
+        self.assertEqual(decode(b"\x1b[1;2B"), "shift-down")
+        self.assertEqual(decode(b"\x1b[1;2A"), "shift-up")
+        self.assertEqual(decode(b"\x1bOB"), "down")
+        self.assertEqual(decode(b"j"), "j")
+        self.assertEqual(decode(b"\x1b"), "escape")   # 单独 Esc = 取消
+        self.assertEqual(decode(b"\x1ba"), "escape")  # Alt+字母，不是方向键
+        self.assertEqual(decode(b"\x1b["), "escape")  # 半个序列，别硬猜
+
+
 class CLITests(FixtureTest):
     def run_cli(self, arguments):
         with contextlib.redirect_stdout(io.StringIO()) as output, \
@@ -2173,6 +2226,23 @@ class WebAppTests(FixtureTest):
         self.assertTrue(payload["packages"][0]["icon"].startswith("/api/icon?"))
         self.assertEqual(payload["sources"], [source for source in SOURCES])
 
+    def test_installed_counts_every_source_before_the_limit_cuts_the_list(self):
+        """每个来源的数量要在截断前算好，否则界面上的分解对不上 total。"""
+        app = self.app()
+        packages = ([LocalPackage("pacman", f"pkg-{index}", "1.0-1") for index in range(3)]
+                    + [LocalPackage("aur", "aur-one", "1.0-1"), LocalPackage("aur", "aur-two", "1.0-1")])
+
+        def read(settings, source):
+            return [package for package in packages if package.source == source]
+
+        with patch.object(Settings, "available", return_value=True), \
+                patch("dick.web.read_installed", side_effect=read):
+            payload = app.installed({"limit": "1"}, {})
+        self.assertEqual(payload["total"], 5)
+        self.assertEqual(len(payload["packages"]), 1)  # 列表被 limit 截断
+        self.assertEqual(payload["counts"], [{"source": "pacman", "count": 3},
+                                             {"source": "aur", "count": 2}])  # 分解仍是完整的
+
     def test_candidates_rank_matches_and_require_target(self):
         app = self.app()
         packages = [LocalPackage("pacman", "firefox", "130.0-1"),
@@ -2686,6 +2756,22 @@ class WebHttpTests(FixtureTest):
         _, _, styles = self.request("/assets/app.css")
         for marker in (b".rank-list", b".rank-actions", b"dragging"):
             self.assertIn(marker, styles)
+
+    def test_installed_meta_uses_the_server_side_breakdown(self):
+        """已安装页的来源分解用 /api/installed 的 counts，不数那一页（列表会被 limit 截断）。"""
+        _, _, script = self.request("/assets/app.js")
+        self.assertIn(b"data.counts", script)
+
+    def test_source_list_lives_only_in_the_settings_page(self):
+        """来源列表只留设置页一份：左边栏那列已启用来源已经搬走，别再长回来。"""
+        _, _, home = self.request("/")
+        self.assertIn(b'id="settingsSources"', home)
+        self.assertIn(b'id="scanSources"', home)  # 重新扫描按钮跟着搬进设置页
+        self.assertNotIn(b'id="sourceList"', home)
+        self.assertNotIn(b"side-section", home)
+        _, _, script = self.request("/assets/app.js")
+        self.assertNotIn(b"renderSources", script)
+        self.assertIn(b"renderSettingsSources", script)
 
     def test_static_assets_keep_the_token_gate_and_privilege_prompt(self):
         """令牌门、提权密码框、令牌清洗必须一直待在静态资源里（都是纯前端逻辑）。"""

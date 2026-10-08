@@ -651,12 +651,20 @@ class WebApp:
         if text:
             packages = [package for package in packages if text in package.name.casefold()]
         packages.sort(key=lambda package: (package.source, package.name.casefold()))
+        # 列表本身按 limit 截断，所以每个来源的数量必须在截断前算好——
+        # 否则界面会出现「共 1501 个：pacman 275」，对不上总数。
+        counts = []
+        for source in SOURCES:
+            count = sum(1 for package in packages if package.source == source)
+            if count:
+                counts.append({"source": source, "count": count})
         results = []
         for package in packages[:limit]:
             record = package.to_dict()
             record["icon"] = f"/api/icon?source={package.source}&name={package.name}"
             results.append(record)
-        return {"total": len(packages), "packages": results, "errors": errors, "sources": sources}
+        return {"total": len(packages), "packages": results, "counts": counts,
+                "errors": errors, "sources": sources}
 
     def candidates(self, query, body):
         target = (query.get("target") or "").strip()

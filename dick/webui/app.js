@@ -418,7 +418,6 @@ async function openApp(record) {
 async function loadSources(scan = false) {
   const data = await api('/api/sources', { query: { scan: scan ? 1 : undefined } });
   state.sources = data.sources;
-  renderSources();
   renderChips();
   renderSettingsSources();
   // loadStatus 与 loadSources 是并发跑的：来源列表后到，排序列表要等它到齐再画一遍。
@@ -426,38 +425,12 @@ async function loadSources(scan = false) {
   if (data.errors && data.errors.length) toast(`来源提示：${data.errors.join('；')}`, 'err');
 }
 
-function renderSources() {
-  const list = $('#sourceList');
-  list.replaceChildren();
-  for (const item of state.sources) {
-    const row = el('li', { class: item.enabled ? '' : 'is-off' });
-    row.append(el('span', { class: `dot ${item.available ? '' : 'off'}` }));
-    const label = el('button', {
-      class: 'link', text: item.source, title: '按来源过滤结果',
-      onclick: () => { toggleFilter(item.source); },
-    });
-    label.style.color = state.filter.has(item.source) ? 'var(--accent-strong)' : 'inherit';
-    label.style.fontWeight = state.filter.has(item.source) ? '600' : '400';
-    row.append(label);
-    const count = item.repositories.length;
-    row.append(el('span', {
-      class: 'count',
-      text: count ? `${count} 仓库` : (item.available ? '无仓库' : '不可用'),
-    }));
-    row.append(el('input', {
-      type: 'checkbox', title: item.enabled ? '禁用该来源' : '启用该来源',
-      checked: item.enabled, onchange: (event) => switchSource(item.source, event.target.checked),
-    }));
-    list.append(row);
-  }
-}
-
 function renderChips() {
   const box = $('#sourceChips');
   box.replaceChildren();
   box.append(el('button', {
     class: `chip ${state.filter.size ? '' : 'is-on'}`, text: '全部',
-    onclick: () => { state.filter.clear(); renderChips(); renderSources(); },
+    onclick: () => { state.filter.clear(); renderChips(); },
   }));
   for (const item of state.sources) {
     if (!item.enabled) continue;
@@ -475,17 +448,23 @@ function toggleFilter(source) {
   if (state.filter.has(source)) state.filter.delete(source);
   else state.filter.add(source);
   renderChips();
-  renderSources();
   if (state.view === 'search' && state.packages.length && $('#searchInput').value.trim()) runSearch({ stay: true });
 }
 
+/* 来源列表只在设置页里出现一处：左边栏那列已启用来源搬到了这里，避免两处维护同一份数据。 */
 function renderSettingsSources() {
   const list = $('#settingsSources');
   list.replaceChildren();
   for (const item of state.sources) {
     const row = el('li', { class: item.enabled ? '' : 'is-off' });
+    row.append(el('span', {
+      class: `dot ${item.available ? '' : 'off'}`,
+      title: item.available ? '原生管理器可用' : '原生管理器不可用',
+    }));
     const box = el('input', {
       type: 'checkbox', checked: item.enabled,
+      title: item.available ? (item.enabled ? '禁用该来源' : '启用该来源')
+        : '原生管理器不可用；启用后要等装好它才会真正生效',
       onchange: (event) => switchSource(item.source, event.target.checked),
     });
     row.append(box, el('strong', { text: item.source }));
@@ -871,7 +850,7 @@ function renderResults() {
   grid.replaceChildren();
   $('#resultsEmpty').hidden = state.packages.length > 0;
   if (!state.packages.length) {
-    $('#resultsEmpty').replaceChildren(el('div', { class: 'empty', text: '没有结果。换个关键词，或在左侧切换来源。' }));
+    $('#resultsEmpty').replaceChildren(el('div', { class: 'empty', text: '没有结果。换个关键词，或到设置页里调整启用的来源。' }));
     return;
   }
   for (const pkg of sortedPackages()) grid.append(packageCard(pkg));
@@ -1113,7 +1092,7 @@ function renderDetail(detail) {
   }
   actions.append(el('button', {
     class: 'btn', text: '搜索该来源',
-    onclick: () => { closeDrawer(); $('#searchInput').value = detail.name; state.filter = new Set([detail.source]); renderChips(); renderSources(); runSearch(); },
+    onclick: () => { closeDrawer(); $('#searchInput').value = detail.name; state.filter = new Set([detail.source]); renderChips(); runSearch(); },
   }));
   if (detail.category) {
     actions.append(el('button', {
@@ -1223,8 +1202,13 @@ async function loadInstalled() {
     renderInstalled();
     const groups = new Map();
     for (const pkg of data.packages) groups.set(pkg.source, (groups.get(pkg.source) || 0) + 1);
+    // 每个来源的数量用服务端在截断前算好的 counts，别拿这一页数出来（对不上 total）。
+    const breakdown = (Array.isArray(data.counts) && data.counts.length)
+      ? data.counts.map((item) => `${item.source} ${item.count}`)
+      : Array.from(groups).map(([source, count]) => `${source} ${count}`);
+    const truncated = data.packages.length < data.total ? `；只列出前 ${data.packages.length} 个` : '';
     $('#installedMeta').textContent = data.total
-      ? `共 ${data.total} 个已安装的包：` + Array.from(groups).map(([source, count]) => `${source} ${count}`).join('、')
+      ? `共 ${data.total} 个已安装的包：${breakdown.join('、')}${truncated}`
       : '没有读取到已安装的包。';
     if (data.errors && data.errors.length) toast(data.errors.join('；'), 'err');
   } catch (error) {
